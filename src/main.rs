@@ -187,19 +187,25 @@ impl App {
             Command::MoveUp => {
                 let pos = self.buffer.cursors().primary().position();
                 if pos.line > 0 {
+                    let new_pos = self
+                        .buffer
+                        .clamp_position(Position::new(pos.line - 1, pos.col));
                     self.buffer
                         .cursors_mut()
                         .primary_mut()
-                        .set_position(Position::new(pos.line - 1, pos.col));
+                        .set_position(new_pos);
                 }
             }
             Command::MoveDown => {
                 let pos = self.buffer.cursors().primary().position();
                 if pos.line + 1 < self.buffer.line_count() {
+                    let new_pos = self
+                        .buffer
+                        .clamp_position(Position::new(pos.line + 1, pos.col));
                     self.buffer
                         .cursors_mut()
                         .primary_mut()
-                        .set_position(Position::new(pos.line + 1, pos.col));
+                        .set_position(new_pos);
                 }
             }
             Command::MoveLineStart => {
@@ -239,10 +245,11 @@ impl App {
                 self.viewport.scroll_up(lines);
                 let pos = self.buffer.cursors().primary().position();
                 let new_line = pos.line.saturating_sub(lines);
+                let new_pos = self.buffer.clamp_position(Position::new(new_line, pos.col));
                 self.buffer
                     .cursors_mut()
                     .primary_mut()
-                    .set_position(Position::new(new_line, pos.col));
+                    .set_position(new_pos);
             }
             Command::PageDown => {
                 let lines = self.viewport.visible_lines();
@@ -250,10 +257,11 @@ impl App {
                 self.viewport.scroll_down(lines, total);
                 let pos = self.buffer.cursors().primary().position();
                 let new_line = (pos.line + lines).min(total.saturating_sub(1));
+                let new_pos = self.buffer.clamp_position(Position::new(new_line, pos.col));
                 self.buffer
                     .cursors_mut()
                     .primary_mut()
-                    .set_position(Position::new(new_line, pos.col));
+                    .set_position(new_pos);
             }
             Command::Undo => {
                 let _ = self.buffer.undo();

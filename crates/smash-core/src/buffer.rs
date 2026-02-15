@@ -203,6 +203,30 @@ impl Buffer {
         &mut self.search
     }
 
+    /// Clamp a position so it falls within valid buffer bounds.
+    ///
+    /// - Line is clamped to `[0, line_count - 1]`.
+    /// - Column is clamped to `[0, line_len]` where `line_len` excludes the
+    ///   trailing newline for non-last lines.
+    pub fn clamp_position(&self, pos: Position) -> Position {
+        let line_count = self.rope.len_lines();
+        if line_count == 0 {
+            return Position::new(0, 0);
+        }
+        let line = pos.line.min(line_count - 1);
+        let line_chars = self.rope.line(line).len_chars();
+        // For non-last lines the trailing '\n' (or '\r\n') is included in
+        // len_chars(); the maximum valid cursor column is just before the
+        // newline.  For the very last line there is no trailing newline so
+        // the max column equals len_chars().
+        let max_col = if line + 1 < line_count {
+            line_chars.saturating_sub(1)
+        } else {
+            line_chars
+        };
+        Position::new(line, pos.col.min(max_col))
+    }
+
     /// Apply an edit command and return the resulting edit events.
     pub fn apply_edit(&mut self, cmd: EditCommand) -> Result<Vec<EditEvent>, EditError> {
         let cursor_before = self.cursors.primary().position();
@@ -833,5 +857,51 @@ mod tests {
 
         let buf = Buffer::open_or_create(BufferId::next(), &file_path).unwrap();
         assert_eq!(buf.text().to_string(), "spaced content");
+    }
+
+    #[test]
+    fn clamp_position_col_within_line_unchanged() {
+        // Line 0: "hello\n" (5 visible chars), Line 1: "hi" (2 chars)
+        let buf = Buffer::from_text(BufferId::next(), "hello\nhi");
+        // Position within bounds — should stay unchanged
+        let pos = Position::new(0, 3);
+        assert_eq!(buf.clamp_position(pos), Position::new(0, 3));
+    }
+
+    #[test]
+    fn clamp_position_col_exceeds_shorter_line() {
+        // Line 0: "hello\n" (5 visible chars), Line 1: "hi" (2 chars)
+        let buf = Buffer::from_text(BufferId::next(), "hello\nhi");
+        // Column 4 exceeds line 1 length (2) — should clamp to col 2
+        let pos = Position::new(1, 4);
+        assert_eq!(buf.clamp_position(pos), Position::new(1, 2));
+    }
+
+    #[test]
+    fn clamp_position_line_exceeds_buffer() {
+        let buf = Buffer::from_text(BufferId::next(), "abc\ndef");
+        // Line 5 doesn't exist — should clamp to last line
+        let pos = Position::new(5, 0);
+        let clamped = buf.clamp_position(pos);
+        assert_eq!(clamped.line, 1);
+    }
+
+    #[test]
+    fn clamp_position_empty_buffer() {
+        let buf = Buffer::new(BufferId::next());
+        let pos = Position::new(3, 10);
+        let clamped = buf.clamp_position(pos);
+        assert_eq!(clamped, Position::new(0, 0));
+    }
+
+    #[test]
+    fn clamp_position_on_line_with_newline() {
+        // Line 0: "abcde\n" — len_chars() is 6 (includes '\n'),
+        // but the valid cursor col should be at most 5 (the '\n' position).
+        // For a middle line, clamp col to len_chars() - 1 (exclude newline).
+        let buf = Buffer::from_text(BufferId::next(), "abcde\nxy");
+        let pos = Position::new(0, 10);
+        let clamped = buf.clamp_position(pos);
+        assert_eq!(clamped, Position::new(0, 5));
     }
 }
