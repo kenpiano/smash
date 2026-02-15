@@ -12,7 +12,9 @@ use smash_core::edit::EditCommand;
 use smash_core::message::MessageBuffer;
 use smash_core::position::Position;
 use smash_core::search::SearchQuery;
-use smash_input::{create_default_keymap, Command, KeyResolver, Keymap, ResolveResult};
+use smash_input::{
+    create_default_keymap, create_vim_normal_layer, Command, KeyResolver, Keymap, ResolveResult,
+};
 use smash_platform::paths::DefaultPaths;
 use smash_platform::paths::PlatformPaths;
 use smash_platform::Platform;
@@ -28,6 +30,14 @@ enum InputMode {
     PromptOpen,
     /// Prompt for a search query.
     PromptFind,
+    /// Prompt for a line number (Ctrl+G).
+    PromptGoToLine,
+    /// Prompt for find-and-replace.
+    PromptFindReplace,
+    /// Prompt for Save-As filename.
+    PromptSaveAs,
+    /// Fuzzy file finder overlay.
+    FileFinder,
 }
 
 /// Application state
@@ -43,11 +53,19 @@ struct App {
     messages: MessageBuffer,
     input_mode: InputMode,
     prompt_input: String,
+    /// Secondary input for find-replace (replacement text).
+    replace_input: String,
+    /// Whether the replace prompt is focused (vs find prompt).
+    replace_focused: bool,
+    /// Fuzzy file finder.
+    file_finder: Option<smash_core::fuzzy_finder::FileFinder>,
+    /// Current finder results.
+    finder_results: Vec<smash_core::fuzzy_finder::FileMatch>,
     running: bool,
 }
 
 impl App {
-    fn new(width: u16, height: u16, file: Option<PathBuf>) -> Result<Self> {
+    fn new(width: u16, height: u16, file: Option<PathBuf>, keymap_preset: &str) -> Result<Self> {
         let id = BufferId::next();
         let (buffer, filename, highlighter) = match file {
             Some(ref path) => {
@@ -69,7 +87,13 @@ impl App {
         let edit_height = height.saturating_sub(1);
 
         let default_layer = create_default_keymap();
-        let keymap = Keymap::new(default_layer);
+        let mut keymap = Keymap::new(default_layer);
+
+        // Apply keymap preset from config
+        if keymap_preset == "vim" {
+            keymap.push_layer(create_vim_normal_layer());
+        }
+
         let resolver = KeyResolver::new(keymap);
 
         Ok(Self {
@@ -83,6 +107,10 @@ impl App {
             messages: MessageBuffer::new(),
             input_mode: InputMode::Normal,
             prompt_input: String::new(),
+            replace_input: String::new(),
+            replace_focused: false,
+            file_finder: None,
+            finder_results: Vec::new(),
             running: true,
         })
     }
@@ -291,17 +319,79 @@ impl App {
             Command::FindPrev => {
                 self.find_prev();
             }
+            Command::GoToLine => {
+                self.input_mode = InputMode::PromptGoToLine;
+                self.prompt_input.clear();
+            }
+            Command::FindReplace => {
+                self.input_mode = InputMode::PromptFindReplace;
+                self.prompt_input.clear();
+                self.replace_input.clear();
+                self.replace_focused = false;
+            }
+            Command::SaveAs => {
+                self.input_mode = InputMode::PromptSaveAs;
+                self.prompt_input.clear();
+            }
+            Command::Close => {
+                // Close current buffer, quit if it was the last one
+                self.running = false;
+            }
+            Command::OpenFileFinder => {
+                self.input_mode = InputMode::FileFinder;
+                self.prompt_input.clear();
+                self.finder_results.clear();
+                // Initialize the file finder if not already done
+                if self.file_finder.is_none() {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        let mut finder = smash_core::fuzzy_finder::FileFinder::new(cwd);
+                        finder.index();
+                        self.file_finder = Some(finder);
+                    }
+                }
+            }
+            Command::OpenCommandPalette => {
+                self.messages.info("Command palette not yet implemented");
+            }
+            Command::MoveWordLeft => {
+                self.move_word_left();
+            }
+            Command::MoveWordRight => {
+                self.move_word_right();
+            }
+            Command::DeleteLine => {
+                self.delete_current_line();
+            }
+            Command::SelectAll => {
+                // Move cursor to buffer start; full selection tracking is TBD
+                self.buffer
+                    .cursors_mut()
+                    .primary_mut()
+                    .set_position(Position::new(0, 0));
+                self.messages.info("SelectAll: cursor moved to start");
+            }
             _ => {
                 // Commands not yet implemented in prototype
             }
         }
     }
 
-    /// Handle input while a prompt is active (PromptOpen or PromptFind).
+    /// Handle input while a prompt is active.
     fn handle_prompt_command(&mut self, cmd: Command) {
         match cmd {
             Command::InsertChar(c) => {
-                self.prompt_input.push(c);
+                match self.input_mode {
+                    InputMode::PromptFindReplace if self.replace_focused => {
+                        self.replace_input.push(c);
+                    }
+                    InputMode::FileFinder => {
+                        self.prompt_input.push(c);
+                        self.update_finder_results();
+                    }
+                    _ => {
+                        self.prompt_input.push(c);
+                    }
+                }
                 // Incremental search while typing in Find mode
                 if self.input_mode == InputMode::PromptFind {
                     self.incremental_search();
@@ -313,13 +403,41 @@ impl App {
                 match self.input_mode {
                     InputMode::PromptOpen => self.confirm_open(&input),
                     InputMode::PromptFind => self.confirm_find(&input),
+                    InputMode::PromptGoToLine => self.confirm_goto_line(&input),
+                    InputMode::PromptSaveAs => self.confirm_save_as(&input),
+                    InputMode::PromptFindReplace => {
+                        if !self.replace_focused {
+                            // Tab to replacement field
+                            self.replace_focused = true;
+                            return;
+                        }
+                        let replacement = self.replace_input.clone();
+                        self.confirm_find_replace(&input, &replacement);
+                    }
+                    InputMode::FileFinder => {
+                        self.confirm_file_finder();
+                    }
                     InputMode::Normal => {}
                 }
-                self.input_mode = InputMode::Normal;
-                self.prompt_input.clear();
+                if self.input_mode != InputMode::PromptFindReplace || !self.replace_focused {
+                    self.input_mode = InputMode::Normal;
+                    self.prompt_input.clear();
+                    self.replace_input.clear();
+                }
             }
             Command::DeleteBackward => {
-                self.prompt_input.pop();
+                match self.input_mode {
+                    InputMode::PromptFindReplace if self.replace_focused => {
+                        self.replace_input.pop();
+                    }
+                    InputMode::FileFinder => {
+                        self.prompt_input.pop();
+                        self.update_finder_results();
+                    }
+                    _ => {
+                        self.prompt_input.pop();
+                    }
+                }
                 // Update incremental search
                 if self.input_mode == InputMode::PromptFind {
                     self.incremental_search();
@@ -329,6 +447,8 @@ impl App {
                 // Treat as cancel
                 self.input_mode = InputMode::Normal;
                 self.prompt_input.clear();
+                self.replace_input.clear();
+                self.finder_results.clear();
             }
             _ => {
                 // Ignore other commands while in prompt mode
@@ -432,6 +552,241 @@ impl App {
         }
     }
 
+    /// Confirm go-to-line: jump cursor to a specific line number.
+    fn confirm_goto_line(&mut self, input: &str) {
+        let input = input.trim();
+        if input.is_empty() {
+            return;
+        }
+        match input.parse::<usize>() {
+            Ok(0) => {
+                self.messages.warn("Line numbers start at 1");
+            }
+            Ok(n) => {
+                let target = (n - 1).min(self.buffer.line_count().saturating_sub(1));
+                self.buffer
+                    .cursors_mut()
+                    .primary_mut()
+                    .set_position(Position::new(target, 0));
+                self.messages.info(format!("Jumped to line {}", target + 1));
+            }
+            Err(_) => {
+                self.messages
+                    .warn(format!("Invalid line number: '{}'", input));
+            }
+        }
+    }
+
+    /// Confirm save-as: save the buffer to a new file path.
+    fn confirm_save_as(&mut self, input: &str) {
+        let input = input.trim();
+        if input.is_empty() {
+            self.messages.warn("Save cancelled — no filename entered");
+            return;
+        }
+        let path = std::path::PathBuf::from(input);
+        match self.buffer.save_as(&path) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unnamed")
+                    .to_string();
+                self.filename = Some(name);
+                self.messages.info(format!("Saved as: {}", input));
+                info!("saved as: {}", input);
+            }
+            Err(e) => {
+                self.messages.error(format!("Save failed: {}", e));
+                error!("save_as failed: {}", e);
+            }
+        }
+    }
+
+    /// Confirm find-replace: replace all occurrences.
+    fn confirm_find_replace(&mut self, pattern: &str, replacement: &str) {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            self.messages.warn("Empty search pattern");
+            self.input_mode = InputMode::Normal;
+            self.prompt_input.clear();
+            self.replace_input.clear();
+            return;
+        }
+        let text = self.buffer.text().to_string();
+        let new_text = text.replace(pattern, replacement);
+        if new_text == text {
+            self.messages
+                .info(format!("No occurrences of '{}' found", pattern));
+        } else {
+            let count = text.matches(pattern).count();
+            // Replace entire buffer content
+            let full_range = smash_core::position::Range::new(
+                Position::new(0, 0),
+                Position::new(
+                    self.buffer.line_count().saturating_sub(1),
+                    self.buffer
+                        .line(self.buffer.line_count().saturating_sub(1))
+                        .map(|l| l.len_chars())
+                        .unwrap_or(0),
+                ),
+            );
+            let edit = EditCommand::Delete { range: full_range };
+            let _ = self.buffer.apply_edit(edit);
+            let edit = EditCommand::Insert {
+                pos: Position::new(0, 0),
+                text: new_text,
+            };
+            let _ = self.buffer.apply_edit(edit);
+            self.messages
+                .info(format!("Replaced {} occurrence(s)", count));
+        }
+        self.input_mode = InputMode::Normal;
+        self.prompt_input.clear();
+        self.replace_input.clear();
+    }
+
+    /// Move cursor one word to the left.
+    fn move_word_left(&mut self) {
+        let pos = self.buffer.cursors().primary().position();
+        if let Some(line_slice) = self.buffer.line(pos.line) {
+            let line_str: String = line_slice.chars().collect();
+            let chars: Vec<char> = line_str.chars().collect();
+            let mut col = pos.col;
+            // Skip whitespace backwards
+            while col > 0 && chars.get(col - 1).is_some_and(|c| c.is_whitespace()) {
+                col -= 1;
+            }
+            // Skip word chars backwards
+            while col > 0
+                && chars
+                    .get(col - 1)
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            {
+                col -= 1;
+            }
+            self.buffer
+                .cursors_mut()
+                .primary_mut()
+                .set_position(Position::new(pos.line, col));
+        } else if pos.line > 0 {
+            // Move to end of previous line
+            let prev_line = pos.line - 1;
+            let prev_len = self
+                .buffer
+                .line(prev_line)
+                .map(|l| l.len_chars().saturating_sub(1))
+                .unwrap_or(0);
+            self.buffer
+                .cursors_mut()
+                .primary_mut()
+                .set_position(Position::new(prev_line, prev_len));
+        }
+    }
+
+    /// Move cursor one word to the right.
+    fn move_word_right(&mut self) {
+        let pos = self.buffer.cursors().primary().position();
+        if let Some(line_slice) = self.buffer.line(pos.line) {
+            let line_str: String = line_slice.chars().collect();
+            let chars: Vec<char> = line_str.chars().collect();
+            let len = chars.len().saturating_sub(1); // exclude newline
+            let mut col = pos.col;
+            // Skip word chars forward
+            while col < len && (chars[col].is_alphanumeric() || chars[col] == '_') {
+                col += 1;
+            }
+            // Skip whitespace forward
+            while col < len && chars[col].is_whitespace() {
+                col += 1;
+            }
+            if col != pos.col {
+                self.buffer
+                    .cursors_mut()
+                    .primary_mut()
+                    .set_position(Position::new(pos.line, col));
+            } else if pos.line + 1 < self.buffer.line_count() {
+                // Move to start of next line
+                self.buffer
+                    .cursors_mut()
+                    .primary_mut()
+                    .set_position(Position::new(pos.line + 1, 0));
+            }
+        }
+    }
+
+    /// Delete the entire current line.
+    fn delete_current_line(&mut self) {
+        let pos = self.buffer.cursors().primary().position();
+        let line_count = self.buffer.line_count();
+        if line_count == 0 {
+            return;
+        }
+        let start = Position::new(pos.line, 0);
+        let end = if pos.line + 1 < line_count {
+            Position::new(pos.line + 1, 0)
+        } else if pos.line > 0 {
+            // Last line: delete from end of previous line
+            let prev_len = self
+                .buffer
+                .line(pos.line - 1)
+                .map(|l| l.len_chars().saturating_sub(1))
+                .unwrap_or(0);
+            let actual_start = Position::new(pos.line - 1, prev_len);
+            let actual_end = Position::new(
+                pos.line,
+                self.buffer
+                    .line(pos.line)
+                    .map(|l| l.len_chars())
+                    .unwrap_or(0),
+            );
+            let range = smash_core::position::Range::new(actual_start, actual_end);
+            let edit = EditCommand::Delete { range };
+            if self.buffer.apply_edit(edit).is_ok() {
+                let new_line = pos.line.saturating_sub(1);
+                self.buffer
+                    .cursors_mut()
+                    .primary_mut()
+                    .set_position(Position::new(new_line, 0));
+            }
+            return;
+        } else {
+            // Single-line buffer: clear the line
+            Position::new(0, self.buffer.line(0).map(|l| l.len_chars()).unwrap_or(0))
+        };
+        let range = smash_core::position::Range::new(start, end);
+        let edit = EditCommand::Delete { range };
+        if self.buffer.apply_edit(edit).is_ok() {
+            let new_line = pos.line.min(self.buffer.line_count().saturating_sub(1));
+            self.buffer
+                .cursors_mut()
+                .primary_mut()
+                .set_position(Position::new(new_line, 0));
+        }
+    }
+
+    /// Update the fuzzy finder results from prompt input.
+    fn update_finder_results(&mut self) {
+        if let Some(ref finder) = self.file_finder {
+            self.finder_results = finder.search(&self.prompt_input, 20);
+        }
+    }
+
+    /// Confirm file finder selection: open the first result.
+    fn confirm_file_finder(&mut self) {
+        if let Some(first) = self.finder_results.first() {
+            let path = first.path().to_path_buf();
+            self.input_mode = InputMode::Normal;
+            self.prompt_input.clear();
+            self.finder_results.clear();
+            self.confirm_open(&path.to_string_lossy());
+        } else {
+            self.messages.info("No matching files");
+            self.input_mode = InputMode::Normal;
+            self.prompt_input.clear();
+        }
+    }
+
     fn render(&mut self, backend: &mut dyn TerminalBackend) -> Result<()> {
         let (w, h) = backend.size()?;
 
@@ -474,6 +829,66 @@ impl App {
                     format!("Find: {} ({} matches)", self.prompt_input, match_count)
                 } else {
                     format!("Find: {}", self.prompt_input)
+                };
+                self.renderer.render_status_bar(
+                    status_area,
+                    &prompt_text,
+                    pos.line,
+                    pos.col,
+                    false,
+                    &theme,
+                );
+            }
+            InputMode::PromptGoToLine => {
+                let prompt_text = format!("Go to line: {}", self.prompt_input);
+                self.renderer.render_status_bar(
+                    status_area,
+                    &prompt_text,
+                    pos.line,
+                    pos.col,
+                    false,
+                    &theme,
+                );
+            }
+            InputMode::PromptSaveAs => {
+                let prompt_text = format!("Save as: {}", self.prompt_input);
+                self.renderer.render_status_bar(
+                    status_area,
+                    &prompt_text,
+                    pos.line,
+                    pos.col,
+                    false,
+                    &theme,
+                );
+            }
+            InputMode::PromptFindReplace => {
+                let prompt_text = if self.replace_focused {
+                    format!(
+                        "Replace '{}' with: {}",
+                        self.prompt_input, self.replace_input
+                    )
+                } else {
+                    format!("Find (for replace): {}", self.prompt_input)
+                };
+                self.renderer.render_status_bar(
+                    status_area,
+                    &prompt_text,
+                    pos.line,
+                    pos.col,
+                    false,
+                    &theme,
+                );
+            }
+            InputMode::FileFinder => {
+                let result_count = self.finder_results.len();
+                let prompt_text = if result_count > 0 {
+                    let first = self.finder_results[0].relative_path();
+                    format!(
+                        "Find file: {} ({} results, top: {})",
+                        self.prompt_input, result_count, first
+                    )
+                } else {
+                    format!("Find file: {}", self.prompt_input)
                 };
                 self.renderer.render_status_bar(
                     status_area,
@@ -533,7 +948,7 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
 
     let config_dir = paths.config_dir();
     let project_dir = std::env::current_dir().ok();
-    let _config = load_config(&config_dir, project_dir.as_deref()).unwrap_or_else(|e| {
+    let config = load_config(&config_dir, project_dir.as_deref()).unwrap_or_else(|e| {
         error!("config load failed, using defaults: {}", e);
         smash_config::Config::default()
     });
@@ -542,7 +957,7 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
 
     let (width, height) = crossterm::terminal::size().context("failed to get terminal size")?;
 
-    let mut app = App::new(width, height, file)?;
+    let mut app = App::new(width, height, file, &config.keymap.preset)?;
 
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(

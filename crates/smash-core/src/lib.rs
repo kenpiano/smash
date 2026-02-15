@@ -3,6 +3,7 @@ pub mod cursor;
 pub mod edit;
 pub mod encoding;
 pub mod error;
+pub mod fuzzy_finder;
 pub mod message;
 pub mod position;
 pub mod search;

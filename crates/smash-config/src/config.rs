@@ -1,5 +1,7 @@
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 /// How line endings are handled.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,6 +164,39 @@ impl Default for LogConfig {
     }
 }
 
+/// Configuration for a single LSP server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspServerEntry {
+    /// The command to run the server.
+    pub command: String,
+    /// Command-line arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// File extensions this server handles.
+    #[serde(default)]
+    pub extensions: Vec<String>,
+}
+
+/// LSP configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspConfig {
+    /// Whether LSP is enabled globally.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-language server configurations, keyed by language ID.
+    #[serde(default)]
+    pub servers: HashMap<String, LspServerEntry>,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: HashMap::new(),
+        }
+    }
+}
+
 /// Top-level SMASH configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -180,6 +215,9 @@ pub struct Config {
     /// Logging settings.
     #[serde(default)]
     pub log: LogConfig,
+    /// LSP configuration.
+    #[serde(default)]
+    pub lsp: LspConfig,
     /// Auto-save interval in seconds (0 = disabled, minimum 5).
     #[serde(default = "default_auto_save")]
     pub auto_save_interval_secs: u64,
@@ -197,6 +235,7 @@ impl Default for Config {
             keymap: KeymapConfig::default(),
             terminal_shell: None,
             log: LogConfig::default(),
+            lsp: LspConfig::default(),
             auto_save_interval_secs: 30,
         }
     }
@@ -252,6 +291,10 @@ mod tests {
             log: LogConfig {
                 level: LogLevel::Debug,
                 file: Some(PathBuf::from("/tmp/smash.log")),
+            },
+            lsp: LspConfig {
+                enabled: false,
+                servers: HashMap::new(),
             },
             auto_save_interval_secs: 60,
         };
