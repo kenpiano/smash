@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/smash-core",
+    "crates/smash-platform",
+    "crates/smash-config",
+    "crates/smash-input",
+    "crates/smash-syntax",
+    "crates/smash-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+
+[workspace.dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+crossterm = "0.28"
+ropey = "1"
+regex = "1"
+toml = "0.8"
+
+[package]
+name = "smash"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "smash"
+path = "src/main.rs"
+
+[dependencies]
+smash-core = { path = "crates/smash-core" }
+smash-platform = { path = "crates/smash-platform" }
+smash-config = { path = "crates/smash-config" }
+smash-input = { path = "crates/smash-input" }
+smash-syntax = { path = "crates/smash-syntax" }
+smash-tui = { path = "crates/smash-tui" }
+crossterm = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+anyhow = "1"
