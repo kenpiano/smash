@@ -164,6 +164,16 @@ pub fn create_default_keymap() -> KeymapLayer {
         Command::LspDiagnosticPrev,
     );
 
+    // Jump navigation
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('O'), Modifiers::CTRL)],
+        Command::JumpBack,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('I'), Modifiers::CTRL)],
+        Command::JumpForward,
+    );
+
     layer
 }
 

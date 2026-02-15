@@ -69,6 +69,9 @@ pub enum Command {
     LspDiagnosticNext,
     LspDiagnosticPrev,
     LspRestart,
+    // Jump navigation
+    JumpBack,
+    JumpForward,
     // Lifecycle
     Quit,
     ForceQuit,

@@ -349,6 +349,10 @@ impl App {
             self.messages.info("No definition found");
             return;
         }
+
+        // Save current position before jumping
+        self.push_jump();
+
         let loc = &locations[0];
         let line = loc.range.start.line as usize;
         let col = loc.range.start.character as usize;
@@ -383,10 +387,22 @@ impl App {
             self.messages.info("No references found");
             return;
         }
+
+        // Save current position before jumping
+        self.push_jump();
+
         let count = locations.len();
         let loc = &locations[0];
         let line = loc.range.start.line as usize;
         let col = loc.range.start.character as usize;
+
+        // Check if it's a different file
+        let current_uri = self.current_uri().unwrap_or_default();
+        if loc.uri != current_uri {
+            let path = loc.uri.strip_prefix("file://").unwrap_or(&loc.uri);
+            self.confirm_open(path);
+        }
+
         self.buffer
             .cursors_mut()
             .primary_mut()

@@ -7,12 +7,91 @@ use std::path::PathBuf;
 
 use smash_core::buffer::{Buffer, BufferId};
 use smash_core::message::MessageBuffer;
+use smash_core::position::Position;
 use smash_input::{create_default_keymap, create_emacs_keymap, KeyResolver, Keymap};
 use smash_lsp::{CompletionItem, Diagnostic};
 use smash_syntax::{LanguageId, RegexHighlighter};
 use smash_tui::{PaneTree, Renderer, Viewport};
 
 use crate::lsp_types::{LspCommand, LspEvent};
+
+/// Maximum number of entries in the jump stack.
+const JUMP_STACK_MAX: usize = 100;
+
+/// A saved cursor location for jump-back / jump-forward navigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JumpLocation {
+    /// Absolute file path (or None for an unnamed buffer).
+    pub(crate) path: Option<PathBuf>,
+    /// Cursor position at the time of the jump.
+    pub(crate) position: Position,
+}
+
+impl JumpLocation {
+    pub(crate) fn new(path: Option<PathBuf>, position: Position) -> Self {
+        Self { path, position }
+    }
+}
+
+/// A stack that records jump locations so the user can navigate back/forward.
+#[derive(Debug)]
+pub(crate) struct JumpStack {
+    /// Past locations (the "back" stack).
+    entries: Vec<JumpLocation>,
+    /// Locations we left via jump-back (the "forward" stack).
+    forward: Vec<JumpLocation>,
+}
+
+impl JumpStack {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            forward: Vec::new(),
+        }
+    }
+
+    /// Push a new location onto the back stack and clear forward history.
+    pub(crate) fn push(&mut self, loc: JumpLocation) {
+        // De-duplicate: skip if the top of the stack is identical.
+        if self.entries.last() == Some(&loc) {
+            return;
+        }
+        self.entries.push(loc);
+        if self.entries.len() > JUMP_STACK_MAX {
+            self.entries.remove(0);
+        }
+        self.forward.clear();
+    }
+
+    /// Pop the most recent location (for jump-back).
+    /// `current` is the location the user is currently at; it is pushed
+    /// onto the forward stack so jump-forward can restore it.
+    pub(crate) fn pop_back(&mut self, current: JumpLocation) -> Option<JumpLocation> {
+        let loc = self.entries.pop()?;
+        self.forward.push(current);
+        Some(loc)
+    }
+
+    /// Pop from the forward stack (for jump-forward).
+    /// `current` is pushed back onto the back stack.
+    pub(crate) fn pop_forward(&mut self, current: JumpLocation) -> Option<JumpLocation> {
+        let loc = self.forward.pop()?;
+        self.entries.push(current);
+        Some(loc)
+    }
+
+    /// Number of back entries.
+    #[cfg(test)]
+    pub(crate) fn back_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Number of forward entries.
+    #[cfg(test)]
+    pub(crate) fn forward_len(&self) -> usize {
+        self.forward.len()
+    }
+}
 
 /// Return the "content length" of a rope line slice.
 ///
@@ -99,6 +178,9 @@ pub(crate) struct App {
     pub(crate) completion_index: usize,
     /// Whether to normalize macOS Option key to Alt.
     pub(crate) option_as_alt: bool,
+    // --- Jump navigation ---
+    /// Stack for jump-back / jump-forward navigation across files.
+    pub(crate) jump_stack: JumpStack,
 }
 
 impl App {
@@ -174,6 +256,7 @@ impl App {
             completion_items: Vec::new(),
             completion_index: 0,
             option_as_alt,
+            jump_stack: JumpStack::new(),
         })
     }
 }
@@ -318,5 +401,212 @@ mod tests {
         // Delete backward
         app.handle_command(Command::DeleteBackward);
         assert_eq!(app.buffer.text().to_string(), "ab");
+    }
+
+    // =====================================================================
+    // JumpStack unit tests
+    // =====================================================================
+
+    #[test]
+    fn jump_stack_new_is_empty() {
+        let stack = JumpStack::new();
+        assert_eq!(stack.back_len(), 0);
+        assert_eq!(stack.forward_len(), 0);
+    }
+
+    #[test]
+    fn jump_stack_push_increases_back_len() {
+        let mut stack = JumpStack::new();
+        stack.push(JumpLocation::new(None, Position::new(0, 0)));
+        assert_eq!(stack.back_len(), 1);
+        stack.push(JumpLocation::new(None, Position::new(5, 3)));
+        assert_eq!(stack.back_len(), 2);
+    }
+
+    #[test]
+    fn jump_stack_push_clears_forward() {
+        let mut stack = JumpStack::new();
+        stack.push(JumpLocation::new(None, Position::new(0, 0)));
+        stack.push(JumpLocation::new(None, Position::new(5, 0)));
+        // pop_back puts current on forward
+        let current = JumpLocation::new(None, Position::new(10, 0));
+        stack.pop_back(current);
+        assert_eq!(stack.forward_len(), 1);
+        // push clears forward
+        stack.push(JumpLocation::new(None, Position::new(20, 0)));
+        assert_eq!(stack.forward_len(), 0);
+    }
+
+    #[test]
+    fn jump_stack_pop_back_returns_last_pushed() {
+        let mut stack = JumpStack::new();
+        let loc_a = JumpLocation::new(None, Position::new(1, 0));
+        let loc_b = JumpLocation::new(None, Position::new(2, 0));
+        stack.push(loc_a.clone());
+        stack.push(loc_b.clone());
+
+        let current = JumpLocation::new(None, Position::new(3, 0));
+        let popped = stack.pop_back(current);
+        assert_eq!(popped, Some(loc_b));
+    }
+
+    #[test]
+    fn jump_stack_pop_back_moves_current_to_forward() {
+        let mut stack = JumpStack::new();
+        stack.push(JumpLocation::new(None, Position::new(1, 0)));
+
+        let current = JumpLocation::new(None, Position::new(5, 0));
+        stack.pop_back(current.clone());
+        assert_eq!(stack.forward_len(), 1);
+
+        // pop_forward should give us back the current we just passed in
+        let dummy = JumpLocation::new(None, Position::new(1, 0));
+        let fwd = stack.pop_forward(dummy);
+        assert_eq!(fwd, Some(current));
+    }
+
+    #[test]
+    fn jump_stack_pop_back_empty_returns_none() {
+        let mut stack = JumpStack::new();
+        let current = JumpLocation::new(None, Position::new(0, 0));
+        assert!(stack.pop_back(current).is_none());
+    }
+
+    #[test]
+    fn jump_stack_pop_forward_empty_returns_none() {
+        let mut stack = JumpStack::new();
+        let current = JumpLocation::new(None, Position::new(0, 0));
+        assert!(stack.pop_forward(current).is_none());
+    }
+
+    #[test]
+    fn jump_stack_round_trip_back_and_forward() {
+        let mut stack = JumpStack::new();
+        let loc_a = JumpLocation::new(None, Position::new(1, 0));
+        let loc_b = JumpLocation::new(None, Position::new(2, 0));
+        let loc_c = JumpLocation::new(None, Position::new(3, 0));
+        stack.push(loc_a.clone());
+        stack.push(loc_b.clone());
+
+        // Go back from C → B
+        let back1 = stack.pop_back(loc_c.clone()).unwrap();
+        assert_eq!(back1, loc_b);
+
+        // Go back from B → A
+        let back2 = stack.pop_back(loc_b.clone()).unwrap();
+        assert_eq!(back2, loc_a);
+
+        // Go forward from A → B
+        let fwd1 = stack.pop_forward(loc_a.clone()).unwrap();
+        assert_eq!(fwd1, loc_b);
+
+        // Go forward from B → C
+        let fwd2 = stack.pop_forward(loc_b.clone()).unwrap();
+        assert_eq!(fwd2, loc_c);
+    }
+
+    #[test]
+    fn jump_stack_deduplicates_consecutive_same_location() {
+        let mut stack = JumpStack::new();
+        let loc = JumpLocation::new(None, Position::new(5, 3));
+        stack.push(loc.clone());
+        stack.push(loc.clone());
+        stack.push(loc.clone());
+        assert_eq!(stack.back_len(), 1, "duplicate pushes should be ignored");
+    }
+
+    #[test]
+    fn jump_stack_respects_max_size() {
+        let mut stack = JumpStack::new();
+        for i in 0..(JUMP_STACK_MAX + 20) {
+            stack.push(JumpLocation::new(None, Position::new(i, 0)));
+        }
+        assert_eq!(stack.back_len(), JUMP_STACK_MAX);
+    }
+
+    #[test]
+    fn jump_location_with_path() {
+        let loc = JumpLocation::new(Some(PathBuf::from("/tmp/foo.rs")), Position::new(10, 5));
+        assert_eq!(loc.path, Some(PathBuf::from("/tmp/foo.rs")));
+        assert_eq!(loc.position, Position::new(10, 5));
+    }
+
+    // =====================================================================
+    // App-level jump navigation tests
+    // =====================================================================
+
+    #[test]
+    fn app_jump_back_with_empty_stack_shows_message() {
+        let mut app = test_app();
+        app.handle_command(Command::JumpBack);
+        // Should not panic, "No previous location" message displayed
+        assert_eq!(app.jump_stack.back_len(), 0);
+    }
+
+    #[test]
+    fn app_jump_forward_with_empty_stack_shows_message() {
+        let mut app = test_app();
+        app.handle_command(Command::JumpForward);
+        // Should not panic, "No next location" message displayed
+        assert_eq!(app.jump_stack.forward_len(), 0);
+    }
+
+    #[test]
+    fn app_push_jump_records_current_position() {
+        let mut app = test_app();
+        let id = BufferId::next();
+        app.buffer = Buffer::from_text(id, "line 0\nline 1\nline 2\n");
+
+        // Move cursor to line 1
+        app.handle_command(Command::MoveDown);
+        app.push_jump();
+
+        assert_eq!(app.jump_stack.back_len(), 1);
+    }
+
+    #[test]
+    fn app_jump_back_restores_position() {
+        let mut app = test_app();
+        let id = BufferId::next();
+        app.buffer = Buffer::from_text(id, "line 0\nline 1\nline 2\n");
+
+        // Record position at line 0
+        app.push_jump();
+        let original_pos = app.buffer.cursors().primary().position();
+
+        // Move cursor to line 2
+        app.handle_command(Command::MoveDown);
+        app.handle_command(Command::MoveDown);
+
+        // Jump back should restore to line 0
+        app.handle_command(Command::JumpBack);
+        let restored_pos = app.buffer.cursors().primary().position();
+        assert_eq!(restored_pos, original_pos);
+    }
+
+    #[test]
+    fn app_jump_back_then_forward_round_trip() {
+        let mut app = test_app();
+        let id = BufferId::next();
+        app.buffer = Buffer::from_text(id, "line 0\nline 1\nline 2\n");
+
+        // Push position at line 0
+        app.push_jump();
+
+        // Move to line 2
+        app.handle_command(Command::MoveDown);
+        app.handle_command(Command::MoveDown);
+        let line2_pos = app.buffer.cursors().primary().position();
+
+        // Jump back (saves line 2 to forward, restores line 0)
+        app.handle_command(Command::JumpBack);
+        assert_eq!(
+            app.buffer.cursors().primary().position(),
+            Position::new(0, 0)
+        );
+
+        // Jump forward (saves line 0 to back, restores line 2)
+        app.handle_command(Command::JumpForward);
+        assert_eq!(app.buffer.cursors().primary().position(), line2_pos);
     }
 }

@@ -6,7 +6,7 @@ use smash_input::Command;
 use smash_syntax::{LanguageId, RegexHighlighter};
 use tracing::{error, info};
 
-use super::{line_content_len, App, InputMode};
+use super::{line_content_len, App, InputMode, JumpLocation};
 
 // =========================================================================
 // Command dispatch
@@ -107,6 +107,9 @@ impl App {
             Command::LspDiagnosticNext => self.lsp_diagnostic_next(),
             Command::LspDiagnosticPrev => self.lsp_diagnostic_prev(),
             Command::LspRestart => self.start_lsp_for_current_file(),
+            // --- Jump navigation ---
+            Command::JumpBack => self.cmd_jump_back(),
+            Command::JumpForward => self.cmd_jump_forward(),
             _ => {
                 // Commands not yet implemented in prototype
             }
@@ -744,6 +747,63 @@ impl App {
             self.messages.info("No matching files");
             self.input_mode = InputMode::Normal;
             self.prompt_input.clear();
+        }
+    }
+}
+
+// =========================================================================
+// Jump navigation
+// =========================================================================
+
+impl App {
+    /// Build a `JumpLocation` representing the current cursor position and file.
+    pub(crate) fn current_jump_location(&self) -> JumpLocation {
+        let path = self.buffer.path().map(|p| p.to_path_buf());
+        let pos = self.buffer.cursors().primary().position();
+        JumpLocation::new(path, pos)
+    }
+
+    /// Push the current location onto the jump stack (before a jump).
+    pub(crate) fn push_jump(&mut self) {
+        let loc = self.current_jump_location();
+        self.jump_stack.push(loc);
+    }
+
+    /// Navigate to a `JumpLocation`, opening the file if necessary.
+    fn navigate_to_location(&mut self, loc: &JumpLocation) {
+        // If the target is in a different file, open it
+        if loc.path != self.buffer.path().map(|p| p.to_path_buf()) {
+            if let Some(ref path) = loc.path {
+                self.confirm_open(&path.to_string_lossy());
+            }
+        }
+        self.buffer
+            .cursors_mut()
+            .primary_mut()
+            .set_position(loc.position);
+    }
+
+    /// Jump back to the previous location in the jump stack.
+    fn cmd_jump_back(&mut self) {
+        let current = self.current_jump_location();
+        if let Some(loc) = self.jump_stack.pop_back(current) {
+            let target = loc.clone();
+            self.navigate_to_location(&target);
+            self.messages.info("Jump back");
+        } else {
+            self.messages.info("No previous location");
+        }
+    }
+
+    /// Jump forward to the next location in the forward stack.
+    fn cmd_jump_forward(&mut self) {
+        let current = self.current_jump_location();
+        if let Some(loc) = self.jump_stack.pop_forward(current) {
+            let target = loc.clone();
+            self.navigate_to_location(&target);
+            self.messages.info("Jump forward");
+        } else {
+            self.messages.info("No next location");
         }
     }
 }

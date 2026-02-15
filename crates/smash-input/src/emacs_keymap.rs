@@ -254,6 +254,16 @@ pub fn create_emacs_keymap() -> KeymapLayer {
         Command::LspGotoDefinition,
     );
 
+    // Jump navigation
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('O'), Modifiers::CTRL)],
+        Command::JumpBack,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('I'), Modifiers::CTRL)],
+        Command::JumpForward,
+    );
+
     layer
 }
 
