@@ -202,6 +202,58 @@ pub fn create_emacs_keymap() -> KeymapLayer {
         Command::PageDown,
     );
 
+    // ── LSP operations ──────────────────────────────────────────
+
+    // Alt-. — go to definition (Emacs style)
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('.'), Modifiers::ALT)],
+        Command::LspGotoDefinition,
+    );
+    // Alt-? — find references
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('?'), Modifiers::ALT)],
+        Command::LspFindReferences,
+    );
+    // Ctrl-c Ctrl-r — rename
+    layer.bind(
+        vec![KeyEvent::ctrl('c'), KeyEvent::ctrl('r')],
+        Command::LspRename,
+    );
+    // Ctrl-c Ctrl-d — hover docs
+    layer.bind(
+        vec![KeyEvent::ctrl('c'), KeyEvent::ctrl('d')],
+        Command::LspHover,
+    );
+    // Alt-/ — completion
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('/'), Modifiers::ALT)],
+        Command::LspCompletion,
+    );
+    // Ctrl-c Ctrl-f — format
+    layer.bind(
+        vec![KeyEvent::ctrl('c'), KeyEvent::ctrl('f')],
+        Command::LspFormat,
+    );
+    // Ctrl-c Ctrl-a — code action
+    layer.bind(
+        vec![KeyEvent::ctrl('c'), KeyEvent::ctrl('a')],
+        Command::LspCodeAction,
+    );
+    // Alt-n / Alt-p — next/prev diagnostic
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('n'), Modifiers::ALT)],
+        Command::LspDiagnosticNext,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('p'), Modifiers::ALT)],
+        Command::LspDiagnosticPrev,
+    );
+    // F12 — go to definition (also standard)
+    layer.bind(
+        vec![KeyEvent::new(Key::F(12), Modifiers::NONE)],
+        Command::LspGotoDefinition,
+    );
+
     layer
 }
 

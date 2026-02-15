@@ -123,6 +123,47 @@ pub fn create_default_keymap() -> KeymapLayer {
         Command::ToggleTerminal,
     );
 
+    // LSP
+    layer.bind(
+        vec![KeyEvent::new(Key::F(12), Modifiers::NONE)],
+        Command::LspGotoDefinition,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::F(12), Modifiers::SHIFT)],
+        Command::LspFindReferences,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::F(2), Modifiers::NONE)],
+        Command::LspRename,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::Char(' '), Modifiers::CTRL)],
+        Command::LspCompletion,
+    );
+    layer.bind(
+        vec![KeyEvent::new(
+            Key::Char('F'),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )],
+        Command::LspFormat,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('.'), Modifiers::CTRL)],
+        Command::LspCodeAction,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::Char('K'), Modifiers::CTRL)],
+        Command::LspHover,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::F(8), Modifiers::NONE)],
+        Command::LspDiagnosticNext,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::F(8), Modifiers::SHIFT)],
+        Command::LspDiagnosticPrev,
+    );
+
     layer
 }
 
@@ -213,7 +254,7 @@ mod tests {
     #[test]
     fn default_keymap_unknown_binding_returns_none() {
         let layer = create_default_keymap();
-        let seq = vec![KeyEvent::new(Key::F(12), Modifiers::NONE)];
+        let seq = vec![KeyEvent::new(Key::F(11), Modifiers::NONE)];
         assert_eq!(layer.get(&seq), None);
     }
 

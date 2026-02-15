@@ -1,9 +1,11 @@
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
+use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, info};
 
 use smash_config::load_config;
@@ -14,6 +16,10 @@ use smash_core::position::Position;
 use smash_core::search::SearchQuery;
 use smash_input::{
     create_default_keymap, create_emacs_keymap, Command, KeyResolver, Keymap, ResolveResult,
+};
+use smash_lsp::{
+    CompletionItem, Diagnostic, DiagnosticSeverity, LspPosition, LspRange, LspRegistry,
+    LspServerConfig,
 };
 use smash_platform::paths::DefaultPaths;
 use smash_platform::paths::PlatformPaths;
@@ -53,6 +59,82 @@ enum InputMode {
     PromptSaveAs,
     /// Fuzzy file finder overlay.
     FileFinder,
+    /// Prompt for LSP rename (new symbol name).
+    PromptLspRename,
+}
+
+/// Events sent from the async LSP task back to the main thread.
+#[allow(dead_code)]
+enum LspEvent {
+    /// LSP server started for a language.
+    ServerStarted(String),
+    /// Hover result (text to display).
+    HoverResult(Option<String>),
+    /// Go-to-definition result (locations).
+    GotoDefinitionResult(Vec<smash_lsp::Location>),
+    /// Find-references result.
+    ReferencesResult(Vec<smash_lsp::Location>),
+    /// Completion result.
+    CompletionResult(Vec<CompletionItem>),
+    /// Format result (text edits).
+    FormatResult(Vec<smash_lsp::TextEdit>),
+    /// Code actions available.
+    CodeActionResult(Vec<smash_lsp::CodeAction>),
+    /// Diagnostics updated for a URI.
+    DiagnosticsUpdated {
+        uri: String,
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// Error message from LSP.
+    Error(String),
+    /// Info message from LSP.
+    Info(String),
+}
+
+/// Commands sent from the main thread to the async LSP task.
+#[allow(dead_code)]
+enum LspCommand {
+    StartServer(LspServerConfig),
+    DidOpen {
+        uri: String,
+        text: String,
+        language_id: String,
+    },
+    DidChange {
+        uri: String,
+        version: i32,
+        text: String,
+    },
+    DidSave {
+        uri: String,
+    },
+    DidClose {
+        uri: String,
+    },
+    Hover {
+        uri: String,
+        position: LspPosition,
+    },
+    GotoDefinition {
+        uri: String,
+        position: LspPosition,
+    },
+    FindReferences {
+        uri: String,
+        position: LspPosition,
+    },
+    Completion {
+        uri: String,
+        position: LspPosition,
+    },
+    Format {
+        uri: String,
+    },
+    CodeAction {
+        uri: String,
+        range: LspRange,
+    },
+    Shutdown,
 }
 
 /// Application state
@@ -77,12 +159,47 @@ struct App {
     /// Current finder results.
     finder_results: Vec<smash_core::fuzzy_finder::FileMatch>,
     running: bool,
+    // --- LSP integration ---
+    /// Channel to send commands to the LSP async task.
+    lsp_cmd_tx: tokio::sync::mpsc::Sender<LspCommand>,
+    /// Channel to receive events from the LSP async task.
+    lsp_evt_rx: std::sync::mpsc::Receiver<LspEvent>,
+    /// Current document version (incremented on each edit for didChange).
+    document_version: i32,
+    /// Current language ID for the active buffer.
+    language_id: Option<String>,
+    /// Whether LSP is enabled in config.
+    lsp_enabled: bool,
+    /// LSP server configs from config file.
+    lsp_server_configs: std::collections::HashMap<String, smash_config::LspServerEntry>,
+    /// Whether an LSP server has been started for the current language.
+    lsp_server_started: bool,
+    /// Diagnostics for the current file.
+    current_diagnostics: Vec<Diagnostic>,
+    /// Current diagnostic index for next/prev navigation.
+    diagnostic_index: usize,
+    /// Last hover text to display.
+    hover_text: Option<String>,
+    /// Completion items from LSP.
+    completion_items: Vec<CompletionItem>,
+    /// Selected completion index.
+    completion_index: usize,
 }
 
 impl App {
-    fn new(width: u16, height: u16, file: Option<PathBuf>, keymap_preset: &str) -> Result<Self> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        width: u16,
+        height: u16,
+        file: Option<PathBuf>,
+        keymap_preset: &str,
+        lsp_cmd_tx: tokio::sync::mpsc::Sender<LspCommand>,
+        lsp_evt_rx: std::sync::mpsc::Receiver<LspEvent>,
+        lsp_enabled: bool,
+        lsp_server_configs: std::collections::HashMap<String, smash_config::LspServerEntry>,
+    ) -> Result<Self> {
         let id = BufferId::next();
-        let (buffer, filename, highlighter) = match file {
+        let (buffer, filename, highlighter, lang_id) = match file {
             Some(ref path) => {
                 let buf = Buffer::open_or_create(id, path)
                     .with_context(|| format!("failed to open: {}", path.display()))?;
@@ -93,9 +210,10 @@ impl App {
                     .to_string();
                 let lang = LanguageId::from_path(path);
                 let hl = RegexHighlighter::new(lang).ok();
-                (buf, Some(name), hl)
+                let lang_str = lang.as_str().to_string();
+                (buf, Some(name), hl, Some(lang_str))
             }
-            None => (Buffer::new(id), None, None),
+            None => (Buffer::new(id), None, None, None),
         };
 
         // Reserve 1 line for status bar
@@ -127,6 +245,18 @@ impl App {
             file_finder: None,
             finder_results: Vec::new(),
             running: true,
+            lsp_cmd_tx,
+            lsp_evt_rx,
+            document_version: 1,
+            language_id: lang_id,
+            lsp_enabled,
+            lsp_server_configs,
+            lsp_server_started: false,
+            current_diagnostics: Vec::new(),
+            diagnostic_index: 0,
+            hover_text: None,
+            completion_items: Vec::new(),
+            completion_index: 0,
         })
     }
 
@@ -157,6 +287,7 @@ impl App {
                         .cursors_mut()
                         .primary_mut()
                         .set_position(new_pos);
+                    self.lsp_did_change();
                 }
             }
             Command::InsertNewline => {
@@ -170,6 +301,7 @@ impl App {
                     let edit = EditCommand::Delete { range };
                     if self.buffer.apply_edit(edit).is_ok() {
                         self.buffer.cursors_mut().primary_mut().set_position(start);
+                        self.lsp_did_change();
                     }
                 } else if pos.line > 0 {
                     let prev_line = pos.line - 1;
@@ -183,6 +315,7 @@ impl App {
                     let edit = EditCommand::Delete { range };
                     if self.buffer.apply_edit(edit).is_ok() {
                         self.buffer.cursors_mut().primary_mut().set_position(start);
+                        self.lsp_did_change();
                     }
                 }
             }
@@ -202,7 +335,9 @@ impl App {
                 };
                 let range = smash_core::position::Range::new(pos, end);
                 let edit = EditCommand::Delete { range };
-                let _ = self.buffer.apply_edit(edit);
+                if self.buffer.apply_edit(edit).is_ok() {
+                    self.lsp_did_change();
+                }
             }
             Command::MoveLeft => {
                 let pos = self.buffer.cursors().primary().position();
@@ -318,6 +453,7 @@ impl App {
                         Ok(()) => {
                             self.messages.info("File saved");
                             info!("file saved");
+                            self.lsp_did_save();
                         }
                         Err(e) => {
                             self.messages.error(format!("Save failed: {}", e));
@@ -393,6 +529,42 @@ impl App {
                     .set_position(Position::new(0, 0));
                 self.messages.info("SelectAll: cursor moved to start");
             }
+            // --- LSP commands ---
+            Command::LspHover => {
+                self.lsp_hover();
+            }
+            Command::LspGotoDefinition => {
+                self.lsp_goto_definition();
+            }
+            Command::LspFindReferences => {
+                self.lsp_find_references();
+            }
+            Command::LspCompletion => {
+                self.lsp_completion();
+            }
+            Command::LspFormat => {
+                self.lsp_format();
+            }
+            Command::LspRename => {
+                if self.lsp_server_started {
+                    self.input_mode = InputMode::PromptLspRename;
+                    self.prompt_input.clear();
+                } else {
+                    self.messages.warn("No LSP server running");
+                }
+            }
+            Command::LspCodeAction => {
+                self.lsp_code_action();
+            }
+            Command::LspDiagnosticNext => {
+                self.lsp_diagnostic_next();
+            }
+            Command::LspDiagnosticPrev => {
+                self.lsp_diagnostic_prev();
+            }
+            Command::LspRestart => {
+                self.start_lsp_for_current_file();
+            }
             _ => {
                 // Commands not yet implemented in prototype
             }
@@ -428,6 +600,7 @@ impl App {
                     InputMode::PromptFind => self.confirm_find(&input),
                     InputMode::PromptGoToLine => self.confirm_goto_line(&input),
                     InputMode::PromptSaveAs => self.confirm_save_as(&input),
+                    InputMode::PromptLspRename => self.confirm_lsp_rename(&input),
                     InputMode::PromptFindReplace => {
                         if !self.replace_focused {
                             // Tab to replacement field
@@ -810,6 +983,461 @@ impl App {
         }
     }
 
+    // =====================================================================
+    // LSP integration helpers
+    // =====================================================================
+
+    /// Convert a filesystem path to a `file://` URI.
+    ///
+    /// Relative paths are resolved against the current working directory
+    /// so the URI always contains an absolute path — a requirement of the
+    /// LSP specification.
+    fn path_to_uri(path: &std::path::Path) -> String {
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        };
+        format!("file://{}", abs.to_string_lossy())
+    }
+
+    /// Get the file URI for the current buffer.
+    fn current_uri(&self) -> Option<String> {
+        self.buffer.path().map(Self::path_to_uri)
+    }
+
+    /// Start an LSP server for the current file's language, if configured.
+    fn start_lsp_for_current_file(&mut self) {
+        if !self.lsp_enabled {
+            return;
+        }
+        let lang_id = match &self.language_id {
+            Some(l) => l.clone(),
+            None => return,
+        };
+
+        if let Some(entry) = self.lsp_server_configs.get(&lang_id) {
+            let root_uri = std::env::current_dir().ok().map(|p| Self::path_to_uri(&p));
+            let config = LspServerConfig {
+                command: entry.command.clone(),
+                args: entry.args.clone(),
+                language_id: lang_id.clone(),
+                root_uri,
+            };
+            let _ = self.lsp_cmd_tx.try_send(LspCommand::StartServer(config));
+            info!(language = %lang_id, "requesting LSP server start");
+        }
+    }
+
+    /// Send didOpen notification for the current buffer.
+    fn lsp_did_open(&self) {
+        if !self.lsp_server_started {
+            return;
+        }
+        let uri = match self.current_uri() {
+            Some(u) => u,
+            None => return,
+        };
+        let lang_id = match &self.language_id {
+            Some(l) => l.clone(),
+            None => return,
+        };
+        let text = self.buffer.text().to_string();
+        let _ = self.lsp_cmd_tx.try_send(LspCommand::DidOpen {
+            uri,
+            text,
+            language_id: lang_id,
+        });
+    }
+
+    /// Send didChange notification after an edit.
+    fn lsp_did_change(&mut self) {
+        if !self.lsp_server_started {
+            return;
+        }
+        let uri = match self.current_uri() {
+            Some(u) => u,
+            None => return,
+        };
+        self.document_version += 1;
+        let text = self.buffer.text().to_string();
+        let _ = self.lsp_cmd_tx.try_send(LspCommand::DidChange {
+            uri,
+            version: self.document_version,
+            text,
+        });
+    }
+
+    /// Send didSave notification.
+    fn lsp_did_save(&self) {
+        if !self.lsp_server_started {
+            return;
+        }
+        if let Some(uri) = self.current_uri() {
+            let _ = self.lsp_cmd_tx.try_send(LspCommand::DidSave { uri });
+        }
+    }
+
+    /// Request hover information at the cursor position.
+    fn lsp_hover(&mut self) {
+        if !self.lsp_server_started {
+            self.messages.warn("No LSP server running");
+            return;
+        }
+        if let Some(uri) = self.current_uri() {
+            let pos = self.buffer.cursors().primary().position();
+            let _ = self.lsp_cmd_tx.try_send(LspCommand::Hover {
+                uri,
+                position: LspPosition::from(pos),
+            });
+        }
+    }
+
+    /// Request go-to-definition at the cursor position.
+    fn lsp_goto_definition(&mut self) {
+        if !self.lsp_server_started {
+            self.messages.warn("No LSP server running");
+            return;
+        }
+        if let Some(uri) = self.current_uri() {
+            let pos = self.buffer.cursors().primary().position();
+            let _ = self.lsp_cmd_tx.try_send(LspCommand::GotoDefinition {
+                uri,
+                position: LspPosition::from(pos),
+            });
+        }
+    }
+
+    /// Request find-references at the cursor position.
+    fn lsp_find_references(&mut self) {
+        if !self.lsp_server_started {
+            self.messages.warn("No LSP server running");
+            return;
+        }
+        if let Some(uri) = self.current_uri() {
+            let pos = self.buffer.cursors().primary().position();
+            let _ = self.lsp_cmd_tx.try_send(LspCommand::FindReferences {
+                uri,
+                position: LspPosition::from(pos),
+            });
+        }
+    }
+
+    /// Request completions at the cursor position.
+    fn lsp_completion(&mut self) {
+        if !self.lsp_server_started {
+            self.messages.warn("No LSP server running");
+            return;
+        }
+        if let Some(uri) = self.current_uri() {
+            let pos = self.buffer.cursors().primary().position();
+            let _ = self.lsp_cmd_tx.try_send(LspCommand::Completion {
+                uri,
+                position: LspPosition::from(pos),
+            });
+        }
+    }
+
+    /// Request document formatting.
+    fn lsp_format(&mut self) {
+        if !self.lsp_server_started {
+            self.messages.warn("No LSP server running");
+            return;
+        }
+        if let Some(uri) = self.current_uri() {
+            let _ = self.lsp_cmd_tx.try_send(LspCommand::Format { uri });
+        }
+    }
+
+    /// Request code actions at the cursor position.
+    fn lsp_code_action(&mut self) {
+        if !self.lsp_server_started {
+            self.messages.warn("No LSP server running");
+            return;
+        }
+        if let Some(uri) = self.current_uri() {
+            let pos = self.buffer.cursors().primary().position();
+            let range = LspRange::new(LspPosition::from(pos), LspPosition::from(pos));
+            let _ = self
+                .lsp_cmd_tx
+                .try_send(LspCommand::CodeAction { uri, range });
+        }
+    }
+
+    /// Navigate to the next diagnostic.
+    fn lsp_diagnostic_next(&mut self) {
+        if self.current_diagnostics.is_empty() {
+            self.messages.info("No diagnostics");
+            return;
+        }
+        if self.diagnostic_index >= self.current_diagnostics.len() {
+            self.diagnostic_index = 0;
+        }
+        let diag = &self.current_diagnostics[self.diagnostic_index];
+        let line = diag.range.start.line as usize;
+        let col = diag.range.start.character as usize;
+        let severity = match diag.severity {
+            Some(DiagnosticSeverity::Error) => "error",
+            Some(DiagnosticSeverity::Warning) => "warning",
+            Some(DiagnosticSeverity::Information) => "info",
+            Some(DiagnosticSeverity::Hint) => "hint",
+            None => "diagnostic",
+        };
+        let msg = format!(
+            "[{}/{}] {}: {}",
+            self.diagnostic_index + 1,
+            self.current_diagnostics.len(),
+            severity,
+            diag.message
+        );
+        self.buffer
+            .cursors_mut()
+            .primary_mut()
+            .set_position(Position::new(line, col));
+        self.messages.info(msg);
+        self.diagnostic_index += 1;
+    }
+
+    /// Navigate to the previous diagnostic.
+    fn lsp_diagnostic_prev(&mut self) {
+        if self.current_diagnostics.is_empty() {
+            self.messages.info("No diagnostics");
+            return;
+        }
+        if self.diagnostic_index == 0 {
+            self.diagnostic_index = self.current_diagnostics.len();
+        }
+        self.diagnostic_index -= 1;
+        let diag = &self.current_diagnostics[self.diagnostic_index];
+        let line = diag.range.start.line as usize;
+        let col = diag.range.start.character as usize;
+        let severity = match diag.severity {
+            Some(DiagnosticSeverity::Error) => "error",
+            Some(DiagnosticSeverity::Warning) => "warning",
+            Some(DiagnosticSeverity::Information) => "info",
+            Some(DiagnosticSeverity::Hint) => "hint",
+            None => "diagnostic",
+        };
+        let msg = format!(
+            "[{}/{}] {}: {}",
+            self.diagnostic_index + 1,
+            self.current_diagnostics.len(),
+            severity,
+            diag.message
+        );
+        self.buffer
+            .cursors_mut()
+            .primary_mut()
+            .set_position(Position::new(line, col));
+        self.messages.info(msg);
+    }
+
+    /// Confirm LSP rename from prompt.
+    fn confirm_lsp_rename(&mut self, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            self.messages.warn("Rename cancelled — no name entered");
+            self.input_mode = InputMode::Normal;
+            return;
+        }
+        // Rename is handled by sending to the LSP — but the rename response
+        // comes back as a WorkspaceEdit which we'd need to apply. For now,
+        // show a message that the rename was requested.
+        if let Some(_uri) = self.current_uri() {
+            let pos = self.buffer.cursors().primary().position();
+            let lsp_pos = LspPosition::from(pos);
+            self.messages.info(format!(
+                "Rename requested: '{}' at {}:{}",
+                new_name,
+                lsp_pos.line + 1,
+                lsp_pos.character + 1,
+            ));
+            info!(new_name = %new_name, "LSP rename requested");
+            // TODO: Send rename request to LSP when we add LspCommand::Rename
+        } else {
+            self.messages.warn("No file path for rename");
+        }
+        self.input_mode = InputMode::Normal;
+    }
+
+    /// Handle LSP events received from the async task.
+    fn handle_lsp_event(&mut self, event: LspEvent) {
+        match event {
+            LspEvent::ServerStarted(lang) => {
+                self.lsp_server_started = true;
+                self.messages
+                    .info(format!("LSP server started for {}", lang));
+                info!(language = %lang, "LSP server started");
+                // Send didOpen for the current file
+                self.lsp_did_open();
+            }
+            LspEvent::HoverResult(text) => {
+                if let Some(text) = text {
+                    // Truncate long hover text for status bar
+                    let display = if text.len() > 200 {
+                        format!("{}...", &text[..200])
+                    } else {
+                        text.clone()
+                    };
+                    // Replace newlines with spaces for single-line display
+                    let display = display.replace('\n', " | ");
+                    self.hover_text = Some(text);
+                    self.messages.info(format!("Hover: {}", display));
+                } else {
+                    self.hover_text = None;
+                    self.messages.info("No hover information");
+                }
+            }
+            LspEvent::GotoDefinitionResult(locations) => {
+                if locations.is_empty() {
+                    self.messages.info("No definition found");
+                } else {
+                    let loc = &locations[0];
+                    let line = loc.range.start.line as usize;
+                    let col = loc.range.start.character as usize;
+
+                    // Check if it's a different file
+                    let current_uri = self.current_uri().unwrap_or_default();
+                    if loc.uri != current_uri {
+                        // Try to open the file
+                        let path = loc.uri.strip_prefix("file://").unwrap_or(&loc.uri);
+                        self.confirm_open(path);
+                    }
+
+                    self.buffer
+                        .cursors_mut()
+                        .primary_mut()
+                        .set_position(Position::new(line, col));
+
+                    if locations.len() > 1 {
+                        self.messages.info(format!(
+                            "Definition: {}:{} ({} locations)",
+                            line + 1,
+                            col + 1,
+                            locations.len()
+                        ));
+                    } else {
+                        self.messages
+                            .info(format!("Definition: {}:{}", line + 1, col + 1));
+                    }
+                }
+            }
+            LspEvent::ReferencesResult(locations) => {
+                if locations.is_empty() {
+                    self.messages.info("No references found");
+                } else {
+                    let count = locations.len();
+                    // Jump to first reference
+                    let loc = &locations[0];
+                    let line = loc.range.start.line as usize;
+                    let col = loc.range.start.character as usize;
+                    self.buffer
+                        .cursors_mut()
+                        .primary_mut()
+                        .set_position(Position::new(line, col));
+                    self.messages.info(format!("Found {} reference(s)", count));
+                }
+            }
+            LspEvent::CompletionResult(items) => {
+                if items.is_empty() {
+                    self.messages.info("No completions");
+                    self.completion_items.clear();
+                } else {
+                    let count = items.len();
+                    let preview: Vec<&str> =
+                        items.iter().take(5).map(|i| i.label.as_str()).collect();
+                    self.messages.info(format!(
+                        "Completions ({}): {}{}",
+                        count,
+                        preview.join(", "),
+                        if count > 5 { ", ..." } else { "" }
+                    ));
+                    self.completion_items = items;
+                    self.completion_index = 0;
+                }
+            }
+            LspEvent::FormatResult(edits) => {
+                if edits.is_empty() {
+                    self.messages.info("No formatting changes");
+                } else {
+                    // Apply text edits in reverse order to preserve positions
+                    let mut edits = edits;
+                    edits.sort_by(|a, b| {
+                        b.range
+                            .start
+                            .line
+                            .cmp(&a.range.start.line)
+                            .then(b.range.start.character.cmp(&a.range.start.character))
+                    });
+                    let mut applied = 0;
+                    for edit in &edits {
+                        let start = Position::new(
+                            edit.range.start.line as usize,
+                            edit.range.start.character as usize,
+                        );
+                        let end = Position::new(
+                            edit.range.end.line as usize,
+                            edit.range.end.character as usize,
+                        );
+                        let range = smash_core::position::Range::new(start, end);
+                        let delete = EditCommand::Delete { range };
+                        if self.buffer.apply_edit(delete).is_ok() {
+                            let insert = EditCommand::Insert {
+                                pos: start,
+                                text: edit.new_text.clone(),
+                            };
+                            let _ = self.buffer.apply_edit(insert);
+                            applied += 1;
+                        }
+                    }
+                    self.messages
+                        .info(format!("Applied {} formatting edit(s)", applied));
+                    self.lsp_did_change();
+                }
+            }
+            LspEvent::CodeActionResult(actions) => {
+                if actions.is_empty() {
+                    self.messages.info("No code actions available");
+                } else {
+                    let titles: Vec<&str> =
+                        actions.iter().take(5).map(|a| a.title.as_str()).collect();
+                    self.messages
+                        .info(format!("Code actions: {}", titles.join(", ")));
+                    // TODO: Allow selecting and applying code actions
+                }
+            }
+            LspEvent::DiagnosticsUpdated { uri, diagnostics } => {
+                let current_uri = self.current_uri().unwrap_or_default();
+                if uri == current_uri {
+                    let count = diagnostics.len();
+                    let errors = diagnostics
+                        .iter()
+                        .filter(|d| d.severity == Some(DiagnosticSeverity::Error))
+                        .count();
+                    let warnings = diagnostics
+                        .iter()
+                        .filter(|d| d.severity == Some(DiagnosticSeverity::Warning))
+                        .count();
+                    self.current_diagnostics = diagnostics;
+                    self.diagnostic_index = 0;
+                    if count > 0 {
+                        self.messages.info(format!(
+                            "Diagnostics: {} error(s), {} warning(s), {} total",
+                            errors, warnings, count
+                        ));
+                    }
+                }
+            }
+            LspEvent::Error(msg) => {
+                self.messages.error(format!("LSP: {}", msg));
+                error!(msg = %msg, "LSP error");
+            }
+            LspEvent::Info(msg) => {
+                self.messages.info(format!("LSP: {}", msg));
+            }
+        }
+    }
+
     fn render(&mut self, backend: &mut dyn TerminalBackend) -> Result<()> {
         let (w, h) = backend.size()?;
 
@@ -923,15 +1551,45 @@ impl App {
                 );
             }
             InputMode::Normal => {
+                // Build status text with LSP info
+                let diag_info = if !self.current_diagnostics.is_empty() {
+                    let errors = self
+                        .current_diagnostics
+                        .iter()
+                        .filter(|d| d.severity == Some(DiagnosticSeverity::Error))
+                        .count();
+                    let warnings = self
+                        .current_diagnostics
+                        .iter()
+                        .filter(|d| d.severity == Some(DiagnosticSeverity::Warning))
+                        .count();
+                    format!(" E:{} W:{}", errors, warnings)
+                } else {
+                    String::new()
+                };
+
+                let lsp_indicator = if self.lsp_server_started {
+                    " [LSP]"
+                } else {
+                    ""
+                };
+
                 // Show last message if recent, otherwise normal status
                 let status_text = if let Some(msg) = self.messages.last() {
                     format!(
-                        "{} | {}",
+                        "{}{}{} | {}",
                         self.filename.as_deref().unwrap_or("[scratch]"),
+                        lsp_indicator,
+                        diag_info,
                         msg.text()
                     )
                 } else {
-                    self.filename.as_deref().unwrap_or("[scratch]").to_string()
+                    format!(
+                        "{}{}{}",
+                        self.filename.as_deref().unwrap_or("[scratch]"),
+                        lsp_indicator,
+                        diag_info,
+                    )
                 };
                 self.renderer.render_status_bar(
                     status_area,
@@ -939,6 +1597,17 @@ impl App {
                     pos.line,
                     pos.col,
                     self.buffer.is_dirty(),
+                    &theme,
+                );
+            }
+            InputMode::PromptLspRename => {
+                let prompt_text = format!("Rename to: {}", self.prompt_input);
+                self.renderer.render_status_bar(
+                    status_area,
+                    &prompt_text,
+                    pos.line,
+                    pos.col,
+                    false,
                     &theme,
                 );
             }
@@ -980,7 +1649,33 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
 
     let (width, height) = crossterm::terminal::size().context("failed to get terminal size")?;
 
-    let mut app = App::new(width, height, file, &config.keymap.preset)?;
+    // Set up LSP channels
+    let (lsp_cmd_tx, lsp_cmd_rx) = tokio::sync::mpsc::channel::<LspCommand>(64);
+    let (lsp_evt_tx, lsp_evt_rx) = std::sync::mpsc::channel::<LspEvent>();
+
+    // Start tokio runtime for async LSP operations
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime")?;
+
+    // Spawn the LSP manager task
+    runtime.spawn(lsp_manager_task(lsp_cmd_rx, lsp_evt_tx));
+
+    let mut app = App::new(
+        width,
+        height,
+        file,
+        &config.keymap.preset,
+        lsp_cmd_tx.clone(),
+        lsp_evt_rx,
+        config.lsp.enabled,
+        config.lsp.servers.clone(),
+    )?;
+
+    // Start LSP for initial file if configured
+    app.start_lsp_for_current_file();
 
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
@@ -996,7 +1691,19 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
     }
 
     while app.running {
-        if event::poll(Duration::from_millis(100))? {
+        // Drain any pending LSP events
+        let mut had_lsp_event = false;
+        while let Ok(evt) = app.lsp_evt_rx.try_recv() {
+            app.handle_lsp_event(evt);
+            had_lsp_event = true;
+        }
+        if had_lsp_event {
+            if let Err(e) = app.render(&mut backend) {
+                error!("render error: {}", e);
+            }
+        }
+
+        if event::poll(Duration::from_millis(50))? {
             let raw_event = event::read()?;
 
             if let Event::Resize(w, h) = raw_event {
@@ -1046,8 +1753,233 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
     )?;
     crossterm::terminal::disable_raw_mode()?;
 
+    // Shutdown LSP servers
+    let _ = lsp_cmd_tx.try_send(LspCommand::Shutdown);
+    // Give the runtime a moment to clean up
+    drop(lsp_cmd_tx);
+    runtime.shutdown_timeout(Duration::from_secs(2));
+
     info!("smash exited cleanly");
     Ok(())
+}
+
+/// Async task that manages LSP servers and processes commands.
+///
+/// Runs on the tokio runtime, receives commands from the main thread,
+/// and sends events back via the event channel.
+async fn lsp_manager_task(
+    mut cmd_rx: tokio::sync::mpsc::Receiver<LspCommand>,
+    evt_tx: std::sync::mpsc::Sender<LspEvent>,
+) {
+    let registry = Arc::new(TokioMutex::new(LspRegistry::new()));
+
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            LspCommand::StartServer(config) => {
+                let lang = config.language_id.clone();
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let mut reg = registry.lock().await;
+                    match reg.start_server(config).await {
+                        Ok(_id) => {
+                            let _ = evt_tx.send(LspEvent::ServerStarted(lang));
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(LspEvent::Error(format!(
+                                "Failed to start LSP for {}: {}",
+                                lang, e
+                            )));
+                        }
+                    }
+                });
+            }
+            LspCommand::DidOpen {
+                uri,
+                text,
+                language_id,
+            } => {
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                let lang_id = language_id.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    if let Some(client) = reg.get(&lang_id) {
+                        if let Err(e) = client.did_open(&uri, &text, &lang_id).await {
+                            let _ = evt_tx.send(LspEvent::Error(format!("didOpen: {}", e)));
+                        }
+                    }
+                });
+            }
+            LspCommand::DidChange { uri, version, text } => {
+                let registry = registry.clone();
+                // Find the language for this URI by checking all clients
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            let _ = client.did_change(&uri, version, &text).await;
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::DidSave { uri } => {
+                let registry = registry.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            let _ = client.did_save(&uri).await;
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::DidClose { uri } => {
+                let registry = registry.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            let _ = client.did_close(&uri).await;
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::Hover { uri, position } => {
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            match client.hover(&uri, position).await {
+                                Ok(hover) => {
+                                    let text = hover.map(|h| h.contents.value);
+                                    let _ = evt_tx.send(LspEvent::HoverResult(text));
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx.send(LspEvent::Error(format!("hover: {}", e)));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::GotoDefinition { uri, position } => {
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            match client.goto_definition(&uri, position).await {
+                                Ok(locations) => {
+                                    let _ = evt_tx.send(LspEvent::GotoDefinitionResult(locations));
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(LspEvent::Error(format!("gotoDefinition: {}", e)));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::FindReferences { uri, position } => {
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            match client.find_references(&uri, position).await {
+                                Ok(locations) => {
+                                    let _ = evt_tx.send(LspEvent::ReferencesResult(locations));
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(LspEvent::Error(format!("findReferences: {}", e)));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::Completion { uri, position } => {
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            match client.completion(&uri, position).await {
+                                Ok(items) => {
+                                    let _ = evt_tx.send(LspEvent::CompletionResult(items));
+                                }
+                                Err(e) => {
+                                    let _ =
+                                        evt_tx.send(LspEvent::Error(format!("completion: {}", e)));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::Format { uri } => {
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            match client.format(&uri).await {
+                                Ok(edits) => {
+                                    let _ = evt_tx.send(LspEvent::FormatResult(edits));
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx.send(LspEvent::Error(format!("format: {}", e)));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::CodeAction { uri, range } => {
+                let registry = registry.clone();
+                let evt_tx = evt_tx.clone();
+                tokio::spawn(async move {
+                    let reg = registry.lock().await;
+                    for lang in reg.active_languages() {
+                        if let Some(client) = reg.get(lang) {
+                            match client.code_action(&uri, range, vec![]).await {
+                                Ok(actions) => {
+                                    let _ = evt_tx.send(LspEvent::CodeActionResult(actions));
+                                }
+                                Err(e) => {
+                                    let _ =
+                                        evt_tx.send(LspEvent::Error(format!("codeAction: {}", e)));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            LspCommand::Shutdown => {
+                let mut reg = registry.lock().await;
+                reg.shutdown_all().await;
+                break;
+            }
+        }
+    }
 }
 
 /// Minimal crossterm backend for production use
@@ -1159,6 +2091,50 @@ mod tests {
     use super::*;
     use smash_core::buffer::{Buffer, BufferId};
 
+    /// Create a test App instance with dummy LSP channels.
+    fn test_app() -> App {
+        let (lsp_cmd_tx, _lsp_cmd_rx) = tokio::sync::mpsc::channel(1);
+        let (_lsp_evt_tx, lsp_evt_rx) = std::sync::mpsc::channel();
+        App::new(
+            80,
+            24,
+            None,
+            "default",
+            lsp_cmd_tx,
+            lsp_evt_rx,
+            false,
+            std::collections::HashMap::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn path_to_uri_absolute_path() {
+        let uri = App::path_to_uri(std::path::Path::new("/home/user/project/main.rs"));
+        assert_eq!(uri, "file:///home/user/project/main.rs");
+    }
+
+    #[test]
+    fn path_to_uri_relative_path_becomes_absolute() {
+        let uri = App::path_to_uri(std::path::Path::new("hello.c"));
+        assert!(
+            uri.starts_with("file:///"),
+            "relative path must produce absolute file URI, got: {}",
+            uri
+        );
+        assert!(
+            uri.ends_with("/hello.c"),
+            "URI must end with the filename, got: {}",
+            uri
+        );
+    }
+
+    #[test]
+    fn current_uri_returns_none_for_empty_buffer() {
+        let app = test_app();
+        assert!(app.current_uri().is_none());
+    }
+
     #[test]
     fn line_content_len_excludes_trailing_newline() {
         let buf = Buffer::from_text(BufferId::next(), "hello\nworld\n");
@@ -1200,7 +2176,7 @@ mod tests {
     fn cursor_can_reach_end_of_last_line_without_newline() {
         // Simulate: buffer contains "abc" (no trailing newline).
         // The cursor should be able to move to column 3 (after 'c').
-        let mut app = App::new(80, 24, None, "default").unwrap();
+        let mut app = test_app();
         let id = BufferId::next();
         app.buffer = Buffer::from_text(id, "abc");
 
@@ -1218,7 +2194,7 @@ mod tests {
     fn cursor_can_insert_at_eof_after_newline() {
         // Buffer: "abc\n" — last line is empty.
         // Cursor should be able to type on the empty last line.
-        let mut app = App::new(80, 24, None, "default").unwrap();
+        let mut app = test_app();
         let id = BufferId::next();
         app.buffer = Buffer::from_text(id, "abc\n");
 
@@ -1226,14 +2202,17 @@ mod tests {
         app.handle_command(Command::MoveBufferEnd);
         app.handle_command(Command::InsertChar('x'));
         let text = app.buffer.text().to_string();
-        assert!(text.contains("x"), "should be able to insert on empty last line");
+        assert!(
+            text.contains("x"),
+            "should be able to insert on empty last line"
+        );
     }
 
     #[test]
     fn delete_backward_at_end_of_last_line() {
         // Buffer: "abc" — cursor at col 3 (after 'c').
         // DeleteBackward should delete 'c'.
-        let mut app = App::new(80, 24, None, "default").unwrap();
+        let mut app = test_app();
         let id = BufferId::next();
         app.buffer = Buffer::from_text(id, "abc");
 

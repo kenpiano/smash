@@ -58,6 +58,17 @@ pub enum Command {
     // Terminal
     ToggleTerminal,
     NewTerminal,
+    // LSP
+    LspHover,
+    LspGotoDefinition,
+    LspFindReferences,
+    LspCompletion,
+    LspFormat,
+    LspRename,
+    LspCodeAction,
+    LspDiagnosticNext,
+    LspDiagnosticPrev,
+    LspRestart,
     // Lifecycle
     Quit,
     ForceQuit,
