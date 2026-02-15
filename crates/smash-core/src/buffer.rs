@@ -3,6 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ropey::Rope;
 
+/// Re-export `ropey::RopeSlice` so downstream crates can reference it
+/// without adding a direct `ropey` dependency.
+pub type RopeSlice<'a> = ropey::RopeSlice<'a>;
+
 use crate::cursor::{Cursor, CursorSet};
 use crate::edit::{EditCommand, EditEvent};
 use crate::encoding::{detect_line_ending, LineEnding};

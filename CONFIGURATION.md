@@ -117,18 +117,32 @@ cursor_blink = true
 
 ```toml
 [keymap]
-# Built-in keymap preset: "default" or "vim".
+# Built-in keymap preset: "default" or "emacs".
 preset = "default"
 ```
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `preset` | `"default"` \| `"vim"` | `"default"` | Keymap preset to use |
+| `preset` | `"default"` \| `"emacs"` | `"default"` | Keymap preset to use |
 
-Setting `preset = "vim"` pushes a Vim Normal mode layer on top of the default keybindings. In Vim mode:
-- Normal mode uses `h/j/k/l` for movement, `dd` for delete line, `u` for undo, etc.
-- Press `i`, `a`, or `o` to enter Insert mode (regular typing).
-- Press `Esc` in Insert mode to return to Normal mode.
+Setting `preset = "emacs"` pushes an Emacs-style layer on top of the default keybindings. No modal switching is needed — all bindings use Ctrl or Alt modifiers:
+
+| Key | Action |
+|---|---|
+| `Ctrl-f` / `Ctrl-b` | Forward / backward character |
+| `Ctrl-n` / `Ctrl-p` | Next / previous line |
+| `Ctrl-a` / `Ctrl-e` | Beginning / end of line |
+| `Alt-f` / `Alt-b` | Forward / backward word |
+| `Ctrl-v` / `Alt-v` | Page down / page up |
+| `Alt-<` / `Alt->` | Beginning / end of buffer |
+| `Ctrl-d` | Delete forward character |
+| `Ctrl-k` | Kill (delete) line |
+| `Ctrl-s` | Incremental search |
+| `Ctrl-r` | Reverse search |
+| `Alt-x` | Command palette (M-x) |
+| `Ctrl-x Ctrl-s` | Save |
+| `Ctrl-x Ctrl-c` | Quit |
+| `Ctrl-x Ctrl-f` | Open file |
 
 ---
 
@@ -263,7 +277,7 @@ trim_trailing_whitespace = true
 line_numbers = "relative"
 
 [keymap]
-preset = "vim"
+preset = "emacs"
 
 [lsp]
 enabled = true

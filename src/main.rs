@@ -13,13 +13,28 @@ use smash_core::message::MessageBuffer;
 use smash_core::position::Position;
 use smash_core::search::SearchQuery;
 use smash_input::{
-    create_default_keymap, create_vim_normal_layer, Command, KeyResolver, Keymap, ResolveResult,
+    create_default_keymap, create_emacs_keymap, Command, KeyResolver, Keymap, ResolveResult,
 };
 use smash_platform::paths::DefaultPaths;
 use smash_platform::paths::PlatformPaths;
 use smash_platform::Platform;
 use smash_syntax::{LanguageId, RegexHighlighter};
 use smash_tui::{default_dark_theme, PaneTree, Rect, Renderer, TerminalBackend, Viewport};
+
+/// Return the "content length" of a rope line slice.
+///
+/// Ropey includes a trailing `\n` in `len_chars()` for every line except
+/// (potentially) the last one.  This helper subtracts 1 only when the line
+/// actually ends with a newline so that the cursor can reach the true end
+/// of text on the final line.
+fn line_content_len(line: smash_core::buffer::RopeSlice<'_>) -> usize {
+    let len = line.len_chars();
+    if len > 0 && line.char(len - 1) == '\n' {
+        len - 1
+    } else {
+        len
+    }
+}
 
 /// The current input mode of the editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,13 +101,13 @@ impl App {
         // Reserve 1 line for status bar
         let edit_height = height.saturating_sub(1);
 
-        let default_layer = create_default_keymap();
-        let mut keymap = Keymap::new(default_layer);
-
-        // Apply keymap preset from config
-        if keymap_preset == "vim" {
-            keymap.push_layer(create_vim_normal_layer());
-        }
+        // Select base keymap from config preset
+        let base_layer = if keymap_preset == "emacs" {
+            create_emacs_keymap()
+        } else {
+            create_default_keymap()
+        };
+        let keymap = Keymap::new(base_layer);
 
         let resolver = KeyResolver::new(keymap);
 
@@ -161,7 +176,7 @@ impl App {
                     let prev_len = self
                         .buffer
                         .line(prev_line)
-                        .map(|l| l.len_chars().saturating_sub(1))
+                        .map(line_content_len)
                         .unwrap_or(0);
                     let start = Position::new(prev_line, prev_len);
                     let range = smash_core::position::Range::new(start, pos);
@@ -176,7 +191,7 @@ impl App {
                 let line_len = self
                     .buffer
                     .line(pos.line)
-                    .map(|l| l.len_chars().saturating_sub(1))
+                    .map(line_content_len)
                     .unwrap_or(0);
                 let end = if pos.col < line_len {
                     Position::new(pos.line, pos.col + 1)
@@ -203,7 +218,7 @@ impl App {
                 let line_len = self
                     .buffer
                     .line(pos.line)
-                    .map(|l| l.len_chars().saturating_sub(1))
+                    .map(line_content_len)
                     .unwrap_or(0);
                 if pos.col < line_len {
                     self.buffer
@@ -242,7 +257,7 @@ impl App {
                 let line_len = self
                     .buffer
                     .line(pos.line)
-                    .map(|l| l.len_chars().saturating_sub(1))
+                    .map(line_content_len)
                     .unwrap_or(0);
                 self.buffer
                     .cursors_mut()
@@ -675,7 +690,7 @@ impl App {
             let prev_len = self
                 .buffer
                 .line(prev_line)
-                .map(|l| l.len_chars().saturating_sub(1))
+                .map(line_content_len)
                 .unwrap_or(0);
             self.buffer
                 .cursors_mut()
@@ -688,9 +703,9 @@ impl App {
     fn move_word_right(&mut self) {
         let pos = self.buffer.cursors().primary().position();
         if let Some(line_slice) = self.buffer.line(pos.line) {
+            let len = line_content_len(line_slice);
             let line_str: String = line_slice.chars().collect();
             let chars: Vec<char> = line_str.chars().collect();
-            let len = chars.len().saturating_sub(1); // exclude newline
             let mut col = pos.col;
             // Skip word chars forward
             while col < len && (chars[col].is_alphanumeric() || chars[col] == '_') {
@@ -730,7 +745,7 @@ impl App {
             let prev_len = self
                 .buffer
                 .line(pos.line - 1)
-                .map(|l| l.len_chars().saturating_sub(1))
+                .map(line_content_len)
                 .unwrap_or(0);
             let actual_start = Position::new(pos.line - 1, prev_len);
             let actual_end = Position::new(
@@ -1128,5 +1143,99 @@ fn main() {
     if let Err(e) = run_editor(file) {
         eprintln!("smash: {:#}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smash_core::buffer::{Buffer, BufferId};
+
+    #[test]
+    fn line_content_len_excludes_trailing_newline() {
+        let buf = Buffer::from_text(BufferId::next(), "hello\nworld\n");
+        // First line "hello\n" → content length 5
+        let line0 = buf.line(0).unwrap();
+        assert_eq!(line_content_len(line0), 5);
+        // Second line "world\n" → content length 5
+        let line1 = buf.line(1).unwrap();
+        assert_eq!(line_content_len(line1), 5);
+    }
+
+    #[test]
+    fn line_content_len_last_line_no_newline() {
+        let buf = Buffer::from_text(BufferId::next(), "hello\nworld");
+        // First line "hello\n" → content length 5
+        let line0 = buf.line(0).unwrap();
+        assert_eq!(line_content_len(line0), 5);
+        // Last line "world" (no newline) → content length 5
+        let line1 = buf.line(1).unwrap();
+        assert_eq!(line_content_len(line1), 5);
+    }
+
+    #[test]
+    fn line_content_len_single_line_no_newline() {
+        let buf = Buffer::from_text(BufferId::next(), "abc");
+        let line = buf.line(0).unwrap();
+        // "abc" has no trailing newline → content length 3
+        assert_eq!(line_content_len(line), 3);
+    }
+
+    #[test]
+    fn line_content_len_empty_buffer() {
+        let buf = Buffer::new(BufferId::next());
+        let line = buf.line(0).unwrap();
+        assert_eq!(line_content_len(line), 0);
+    }
+
+    #[test]
+    fn cursor_can_reach_end_of_last_line_without_newline() {
+        // Simulate: buffer contains "abc" (no trailing newline).
+        // The cursor should be able to move to column 3 (after 'c').
+        let mut app = App::new(80, 24, None, "default").unwrap();
+        let id = BufferId::next();
+        app.buffer = Buffer::from_text(id, "abc");
+
+        // MoveLineEnd should place cursor at column 3
+        app.handle_command(Command::MoveLineEnd);
+        let pos = app.buffer.cursors().primary().position();
+        assert_eq!(pos.col, 3, "cursor should be at col 3 (after 'c')");
+
+        // Inserting a char at end-of-content should work
+        app.handle_command(Command::InsertChar('d'));
+        assert_eq!(app.buffer.text().to_string(), "abcd");
+    }
+
+    #[test]
+    fn cursor_can_insert_at_eof_after_newline() {
+        // Buffer: "abc\n" — last line is empty.
+        // Cursor should be able to type on the empty last line.
+        let mut app = App::new(80, 24, None, "default").unwrap();
+        let id = BufferId::next();
+        app.buffer = Buffer::from_text(id, "abc\n");
+
+        // Move to buffer end (empty last line)
+        app.handle_command(Command::MoveBufferEnd);
+        app.handle_command(Command::InsertChar('x'));
+        let text = app.buffer.text().to_string();
+        assert!(text.contains("x"), "should be able to insert on empty last line");
+    }
+
+    #[test]
+    fn delete_backward_at_end_of_last_line() {
+        // Buffer: "abc" — cursor at col 3 (after 'c').
+        // DeleteBackward should delete 'c'.
+        let mut app = App::new(80, 24, None, "default").unwrap();
+        let id = BufferId::next();
+        app.buffer = Buffer::from_text(id, "abc");
+
+        // Move to end
+        app.handle_command(Command::MoveLineEnd);
+        let pos = app.buffer.cursors().primary().position();
+        assert_eq!(pos.col, 3);
+
+        // Delete backward
+        app.handle_command(Command::DeleteBackward);
+        assert_eq!(app.buffer.text().to_string(), "ab");
     }
 }
