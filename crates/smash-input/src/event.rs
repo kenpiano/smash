@@ -173,10 +173,11 @@ fn macos_option_char_to_key(c: char) -> Option<(char, bool)> {
         '¥' => Some(('y', false)),
         'Ω' => Some(('z', false)),
         // Punctuation
-        '≤' => Some(('<', false)),
-        '≥' => Some(('>', false)),
+        '≤' => Some((',', false)),
+        '≥' => Some(('.', false)),
         '÷' => Some(('/', false)),
-        '…' => Some(('.', false)),
+        '˘' => Some(('>', false)),
+        '¯' => Some(('<', false)),
         '¿' => Some(('?', false)),
         // Option+Shift variants
         'Å' => Some(('a', true)),
@@ -187,7 +188,7 @@ fn macos_option_char_to_key(c: char) -> Option<(char, bool)> {
         '˝' => Some(('g', true)),
         'Ó' => Some(('h', true)),
         'Ô' => Some(('j', true)),
-        '\u{F8FF}' => Some(('k', true)), // Apple logo
+        '\u{F8FF}' => Some(('K', true)), // Apple logo
         'Ò' => Some(('l', true)),
         'Â' => Some(('m', true)),
         'Ø' => Some(('o', true)),
