@@ -9,13 +9,26 @@ use tracing::{error, info};
 use smash_config::load_config;
 use smash_core::buffer::{Buffer, BufferId};
 use smash_core::edit::EditCommand;
+use smash_core::message::MessageBuffer;
 use smash_core::position::Position;
+use smash_core::search::SearchQuery;
 use smash_input::{create_default_keymap, Command, KeyResolver, Keymap, ResolveResult};
 use smash_platform::paths::DefaultPaths;
 use smash_platform::paths::PlatformPaths;
 use smash_platform::Platform;
 use smash_syntax::{LanguageId, RegexHighlighter};
 use smash_tui::{default_dark_theme, PaneTree, Rect, Renderer, TerminalBackend, Viewport};
+
+/// The current input mode of the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputMode {
+    /// Normal editing mode.
+    Normal,
+    /// Prompt for a filename to open.
+    PromptOpen,
+    /// Prompt for a search query.
+    PromptFind,
+}
 
 /// Application state
 #[allow(dead_code)]
@@ -27,6 +40,9 @@ struct App {
     resolver: KeyResolver,
     highlighter: Option<RegexHighlighter>,
     filename: Option<String>,
+    messages: MessageBuffer,
+    input_mode: InputMode,
+    prompt_input: String,
     running: bool,
 }
 
@@ -64,11 +80,20 @@ impl App {
             resolver,
             highlighter,
             filename,
+            messages: MessageBuffer::new(),
+            input_mode: InputMode::Normal,
+            prompt_input: String::new(),
             running: true,
         })
     }
 
     fn handle_command(&mut self, cmd: Command) {
+        // When in a prompt mode, route input differently
+        if self.input_mode != InputMode::Normal {
+            self.handle_prompt_command(cmd);
+            return;
+        }
+
         match cmd {
             Command::Quit | Command::ForceQuit => {
                 self.running = false;
@@ -240,17 +265,170 @@ impl App {
                 if self.buffer.path().is_some() {
                     match self.buffer.save() {
                         Ok(()) => {
+                            self.messages.info("File saved");
                             info!("file saved");
                         }
                         Err(e) => {
+                            self.messages.error(format!("Save failed: {}", e));
                             error!("save failed: {}", e);
                         }
                     }
+                } else {
+                    self.messages.warn("No file path set — use Save As");
                 }
+            }
+            Command::Open => {
+                self.input_mode = InputMode::PromptOpen;
+                self.prompt_input.clear();
+            }
+            Command::Find => {
+                self.input_mode = InputMode::PromptFind;
+                self.prompt_input.clear();
+            }
+            Command::FindNext => {
+                self.find_next();
+            }
+            Command::FindPrev => {
+                self.find_prev();
             }
             _ => {
                 // Commands not yet implemented in prototype
             }
+        }
+    }
+
+    /// Handle input while a prompt is active (PromptOpen or PromptFind).
+    fn handle_prompt_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::InsertChar(c) => {
+                self.prompt_input.push(c);
+                // Incremental search while typing in Find mode
+                if self.input_mode == InputMode::PromptFind {
+                    self.incremental_search();
+                }
+            }
+            Command::InsertNewline => {
+                // Confirm the prompt
+                let input = self.prompt_input.clone();
+                match self.input_mode {
+                    InputMode::PromptOpen => self.confirm_open(&input),
+                    InputMode::PromptFind => self.confirm_find(&input),
+                    InputMode::Normal => {}
+                }
+                self.input_mode = InputMode::Normal;
+                self.prompt_input.clear();
+            }
+            Command::DeleteBackward => {
+                self.prompt_input.pop();
+                // Update incremental search
+                if self.input_mode == InputMode::PromptFind {
+                    self.incremental_search();
+                }
+            }
+            Command::Quit | Command::ForceQuit => {
+                // Treat as cancel
+                self.input_mode = InputMode::Normal;
+                self.prompt_input.clear();
+            }
+            _ => {
+                // Ignore other commands while in prompt mode
+            }
+        }
+    }
+
+    /// Run incremental search on the current prompt input.
+    fn incremental_search(&mut self) {
+        let query_str = self.prompt_input.trim().to_string();
+        if query_str.is_empty() {
+            self.buffer.search_mut().clear();
+            return;
+        }
+        let text = self.buffer.text().to_string();
+        let search_query = SearchQuery::Plain {
+            pattern: query_str,
+            case_sensitive: false,
+        };
+        self.buffer.search_mut().set_query(search_query, &text);
+    }
+
+    /// Open a file (or create it) from the prompt.
+    fn confirm_open(&mut self, filename: &str) {
+        let filename = filename.trim();
+        if filename.is_empty() {
+            self.messages.warn("Open cancelled — no filename entered");
+            return;
+        }
+        let path = std::path::PathBuf::from(filename);
+        let id = BufferId::next();
+        match Buffer::open_or_create(id, &path) {
+            Ok(buf) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unnamed")
+                    .to_string();
+                let lang = LanguageId::from_path(&path);
+                self.highlighter = RegexHighlighter::new(lang).ok();
+                self.buffer = buf;
+                self.filename = Some(name.clone());
+                if path.exists() {
+                    self.messages.info(format!("Opened: {}", filename));
+                } else {
+                    self.messages.info(format!("New file: {}", filename));
+                }
+                info!("opened file: {}", filename);
+            }
+            Err(e) => {
+                self.messages
+                    .error(format!("Failed to open '{}': {}", filename, e));
+                error!("open failed: {}", e);
+            }
+        }
+    }
+
+    /// Start a search from the prompt.
+    fn confirm_find(&mut self, query: &str) {
+        let query_str = query.trim();
+        if query_str.is_empty() {
+            self.buffer.search_mut().clear();
+            self.messages.info("Search cleared");
+            return;
+        }
+        let text = self.buffer.text().to_string();
+        let search_query = SearchQuery::Plain {
+            pattern: query_str.to_string(),
+            case_sensitive: false,
+        };
+        self.buffer.search_mut().set_query(search_query, &text);
+        let count = self.buffer.search().match_count();
+        if count > 0 {
+            self.messages
+                .info(format!("Found {} match(es) for '{}'", count, query_str));
+            // Jump to first match
+            self.find_next();
+        } else {
+            self.messages
+                .warn(format!("No matches found for '{}'", query_str));
+        }
+    }
+
+    /// Jump to the next search match.
+    fn find_next(&mut self) {
+        if let Some(m) = self.buffer.search_mut().next_match() {
+            let pos = m.range.start;
+            self.buffer.cursors_mut().primary_mut().set_position(pos);
+        } else {
+            self.messages.info("No search results");
+        }
+    }
+
+    /// Jump to the previous search match.
+    fn find_prev(&mut self) {
+        if let Some(m) = self.buffer.search_mut().prev_match() {
+            let pos = m.range.start;
+            self.buffer.cursors_mut().primary_mut().set_position(pos);
+        } else {
+            self.messages.info("No search results");
         }
     }
 
@@ -277,15 +455,56 @@ impl App {
             true,
         );
 
-        let fname = self.filename.as_deref().unwrap_or("[scratch]");
-        self.renderer.render_status_bar(
-            status_area,
-            fname,
-            pos.line,
-            pos.col,
-            self.buffer.is_dirty(),
-            &theme,
-        );
+        // Determine status bar content based on mode
+        match &self.input_mode {
+            InputMode::PromptOpen => {
+                let prompt_text = format!("Open file: {}", self.prompt_input);
+                self.renderer.render_status_bar(
+                    status_area,
+                    &prompt_text,
+                    pos.line,
+                    pos.col,
+                    false,
+                    &theme,
+                );
+            }
+            InputMode::PromptFind => {
+                let match_count = self.buffer.search().match_count();
+                let prompt_text = if match_count > 0 {
+                    format!("Find: {} ({} matches)", self.prompt_input, match_count)
+                } else {
+                    format!("Find: {}", self.prompt_input)
+                };
+                self.renderer.render_status_bar(
+                    status_area,
+                    &prompt_text,
+                    pos.line,
+                    pos.col,
+                    false,
+                    &theme,
+                );
+            }
+            InputMode::Normal => {
+                // Show last message if recent, otherwise normal status
+                let status_text = if let Some(msg) = self.messages.last() {
+                    format!(
+                        "{} | {}",
+                        self.filename.as_deref().unwrap_or("[scratch]"),
+                        msg.text()
+                    )
+                } else {
+                    self.filename.as_deref().unwrap_or("[scratch]").to_string()
+                };
+                self.renderer.render_status_bar(
+                    status_area,
+                    &status_text,
+                    pos.line,
+                    pos.col,
+                    self.buffer.is_dirty(),
+                    &theme,
+                );
+            }
+        }
 
         self.renderer.flush_to_backend(backend)?;
 
@@ -300,11 +519,18 @@ impl App {
 }
 
 fn run_editor(file: Option<PathBuf>) -> Result<()> {
+    let paths = DefaultPaths::new().context("failed to detect platform paths")?;
+
+    // Direct tracing output to a log file so it never bleeds into the TUI.
+    let log_dir = paths.log_dir();
+    std::fs::create_dir_all(&log_dir).ok();
+    let log_file = std::fs::File::create(log_dir.join("smash.log"))
+        .unwrap_or_else(|_| std::fs::File::create("/dev/null").expect("cannot open /dev/null"));
     tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+        .with_writer(std::sync::Mutex::new(log_file))
+        .with_ansi(false)
         .init();
 
-    let paths = DefaultPaths::new().context("failed to detect platform paths")?;
     let config_dir = paths.config_dir();
     let project_dir = std::env::current_dir().ok();
     let _config = load_config(&config_dir, project_dir.as_deref()).unwrap_or_else(|e| {
@@ -346,6 +572,18 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
             }
 
             if let Some(input) = smash_input::event::from_crossterm(raw_event) {
+                // Handle Esc to cancel prompts
+                if let smash_input::InputEvent::Key(ke) = &input {
+                    if ke.key == smash_input::Key::Esc && app.input_mode != InputMode::Normal {
+                        app.input_mode = InputMode::Normal;
+                        app.prompt_input.clear();
+                        if let Err(e) = app.render(&mut backend) {
+                            error!("render error: {}", e);
+                        }
+                        continue;
+                    }
+                }
+
                 match app.resolver.resolve(input) {
                     ResolveResult::Command(cmd) => {
                         app.handle_command(cmd);

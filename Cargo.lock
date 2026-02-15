@@ -588,10 +588,24 @@ dependencies = [
 [[package]]
 name = "smash-syntax"
 version = "0.1.0"
+dependencies = [
+ "regex",
+ "smash-core",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "smash-tui"
 version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "smash-config",
+ "smash-core",
+ "smash-syntax",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "str_indices"

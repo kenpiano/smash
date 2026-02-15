@@ -27,6 +27,22 @@ pub fn create_default_keymap() -> KeymapLayer {
     layer.bind(vec![KeyEvent::ctrl('g')], Command::GoToLine);
     layer.bind(vec![KeyEvent::ctrl('p')], Command::OpenCommandPalette);
     layer.bind(vec![KeyEvent::ctrl('d')], Command::AddCursorBelow);
+    layer.bind(
+        vec![KeyEvent::new(Key::F(3), Modifiers::NONE)],
+        Command::FindNext,
+    );
+    layer.bind(
+        vec![KeyEvent::new(Key::F(3), Modifiers::SHIFT)],
+        Command::FindPrev,
+    );
+    layer.bind(vec![KeyEvent::ctrl('n')], Command::FindNext);
+    layer.bind(
+        vec![KeyEvent::new(
+            Key::Char('N'),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )],
+        Command::FindPrev,
+    );
 
     // Navigation (no modifier)
     layer.bind(
@@ -257,5 +273,33 @@ mod tests {
     fn default_keymap_name_is_default() {
         let layer = create_default_keymap();
         assert_eq!(layer.name(), "default");
+    }
+
+    #[test]
+    fn default_keymap_f3_is_find_next() {
+        let layer = create_default_keymap();
+        let seq = vec![KeyEvent::new(Key::F(3), Modifiers::NONE)];
+        assert_eq!(layer.get(&seq), Some(&Command::FindNext));
+    }
+
+    #[test]
+    fn default_keymap_shift_f3_is_find_prev() {
+        let layer = create_default_keymap();
+        let seq = vec![KeyEvent::new(Key::F(3), Modifiers::SHIFT)];
+        assert_eq!(layer.get(&seq), Some(&Command::FindPrev));
+    }
+
+    #[test]
+    fn default_keymap_ctrl_n_is_find_next() {
+        let layer = create_default_keymap();
+        let seq = vec![KeyEvent::ctrl('n')];
+        assert_eq!(layer.get(&seq), Some(&Command::FindNext));
+    }
+
+    #[test]
+    fn default_keymap_ctrl_o_is_open() {
+        let layer = create_default_keymap();
+        let seq = vec![KeyEvent::ctrl('o')];
+        assert_eq!(layer.get(&seq), Some(&Command::Open));
     }
 }
