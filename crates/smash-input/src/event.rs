@@ -234,10 +234,21 @@ pub fn normalize_macos_option_key(mut event: KeyEvent) -> KeyEvent {
     event
 }
 
-/// Convert crossterm events to our normalized InputEvent
+/// Convert crossterm events to our normalized InputEvent.
+///
+/// On Windows, crossterm emits separate `Press`, `Release`, and `Repeat`
+/// events for every key stroke.  We process `Press` and `Repeat` events
+/// (the latter is needed for key-hold continuous actions such as cursor
+/// movement) but discard `Release` events to avoid double-firing.
 pub fn from_crossterm(event: crossterm::event::Event) -> Option<InputEvent> {
     match event {
         crossterm::event::Event::Key(ke) => {
+            // Filter: accept Press and Repeat, discard Release.
+            // Repeat events fire when a key is held down (Windows) and are
+            // required for continuous movement, text insertion, etc.
+            if ke.kind == crossterm::event::KeyEventKind::Release {
+                return None;
+            }
             let modifiers = convert_modifiers(ke.modifiers);
             let key = convert_key(ke.code)?;
             Some(InputEvent::Key(KeyEvent::new(key, modifiers)))
@@ -919,5 +930,57 @@ mod tests {
                 "SHIFT should not be set for Option+{expected}"
             );
         }
+    }
+
+    // =================================================================
+    // Windows key-event kind filtering
+    // =================================================================
+
+    #[test]
+    fn from_crossterm_key_release_is_ignored() {
+        // Simulate a Release event (Windows sends these alongside Press)
+        let ct_event = crossterm::event::Event::Key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('a'),
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Release,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        assert_eq!(
+            from_crossterm(ct_event),
+            None,
+            "Release events must be filtered out to prevent double-firing on Windows"
+        );
+    }
+
+    #[test]
+    fn from_crossterm_key_repeat_is_accepted() {
+        // Repeat events fire when a key is held down (e.g. holding an arrow
+        // key for continuous cursor movement).  They must be processed.
+        let ct_event = crossterm::event::Event::Key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('a'),
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Repeat,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        assert_eq!(
+            from_crossterm(ct_event),
+            Some(InputEvent::Key(KeyEvent::char('a'))),
+            "Repeat events must be processed for key-hold actions"
+        );
+    }
+
+    #[test]
+    fn from_crossterm_key_press_is_accepted() {
+        let ct_event = crossterm::event::Event::Key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('a'),
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        assert_eq!(
+            from_crossterm(ct_event),
+            Some(InputEvent::Key(KeyEvent::char('a'))),
+            "Press events must be processed normally"
+        );
     }
 }
