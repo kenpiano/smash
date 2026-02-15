@@ -184,6 +184,8 @@ struct App {
     completion_items: Vec<CompletionItem>,
     /// Selected completion index.
     completion_index: usize,
+    /// Whether to normalize macOS Option key to Alt.
+    option_as_alt: bool,
 }
 
 impl App {
@@ -197,6 +199,7 @@ impl App {
         lsp_evt_rx: std::sync::mpsc::Receiver<LspEvent>,
         lsp_enabled: bool,
         lsp_server_configs: std::collections::HashMap<String, smash_config::LspServerEntry>,
+        option_as_alt: bool,
     ) -> Result<Self> {
         let id = BufferId::next();
         let (buffer, filename, highlighter, lang_id) = match file {
@@ -257,6 +260,7 @@ impl App {
             hover_text: None,
             completion_items: Vec::new(),
             completion_index: 0,
+            option_as_alt,
         })
     }
 
@@ -1438,6 +1442,31 @@ impl App {
         }
     }
 
+    /// Return the highest-priority diagnostic severity for a buffer line.
+    fn highest_diagnostic_severity(&self, buf_line: usize) -> Option<smash_tui::GutterDiagnostic> {
+        use smash_lsp::types::DiagnosticSeverity;
+
+        let mut worst: Option<DiagnosticSeverity> = None;
+        for diag in &self.current_diagnostics {
+            if diag.range.start.line as usize <= buf_line
+                && diag.range.end.line as usize >= buf_line
+            {
+                let sev = diag.severity.unwrap_or(DiagnosticSeverity::Error);
+                worst = Some(match worst {
+                    None => sev,
+                    Some(cur) if (sev as i32) < (cur as i32) => sev,
+                    Some(cur) => cur,
+                });
+            }
+        }
+        worst.map(|s| match s {
+            DiagnosticSeverity::Error => smash_tui::GutterDiagnostic::Error,
+            DiagnosticSeverity::Warning => smash_tui::GutterDiagnostic::Warning,
+            DiagnosticSeverity::Information => smash_tui::GutterDiagnostic::Information,
+            DiagnosticSeverity::Hint => smash_tui::GutterDiagnostic::Hint,
+        })
+    }
+
     fn render(&mut self, backend: &mut dyn TerminalBackend) -> Result<()> {
         let (w, h) = backend.size()?;
 
@@ -1450,6 +1479,14 @@ impl App {
 
         let theme = default_dark_theme();
 
+        // Build per-screen-row diagnostic severity map for the gutter.
+        let line_diagnostics: Vec<Option<smash_tui::GutterDiagnostic>> = (0..edit_area.height)
+            .map(|row| {
+                let buf_line = self.viewport.top_line() + row as usize;
+                self.highest_diagnostic_severity(buf_line)
+            })
+            .collect();
+
         self.renderer.render_buffer(
             &self.buffer,
             &self.viewport,
@@ -1459,6 +1496,7 @@ impl App {
                 .as_ref()
                 .map(|h| h as &dyn smash_syntax::HighlightEngine),
             true,
+            &line_diagnostics,
         );
 
         // Determine status bar content based on mode
@@ -1615,7 +1653,7 @@ impl App {
 
         self.renderer.flush_to_backend(backend)?;
 
-        let gutter_w = 5u16;
+        let gutter_w = 7u16;
         let screen_col = gutter_w + (pos.col.saturating_sub(self.viewport.left_col())) as u16;
         let screen_row = (pos.line.saturating_sub(self.viewport.top_line())) as u16;
         backend.move_cursor(screen_col, screen_row)?;
@@ -1628,22 +1666,57 @@ impl App {
 fn run_editor(file: Option<PathBuf>) -> Result<()> {
     let paths = DefaultPaths::new().context("failed to detect platform paths")?;
 
-    // Direct tracing output to a log file so it never bleeds into the TUI.
-    let log_dir = paths.log_dir();
-    std::fs::create_dir_all(&log_dir).ok();
-    let log_file = std::fs::File::create(log_dir.join("smash.log"))
+    // Load configuration first so we can honour log settings.
+    let config_dir = paths.config_dir();
+    let project_dir = std::env::current_dir().ok();
+    let config = load_config(&config_dir, project_dir.as_deref()).unwrap_or_else(|_e| {
+        // Cannot use tracing yet — subscriber isn't initialised.
+        smash_config::Config::default()
+    });
+
+    // ── Logging initialisation (REQ-NFR-020, REQ-NFR-021) ──────────────────
+    //
+    // Resolve the log file path: explicit config value → platform default.
+    let log_path = config.log.file.clone().unwrap_or_else(|| {
+        let dir = paths.log_dir();
+        dir.join("smash.log")
+    });
+
+    // Ensure parent directory exists and rotate if the file is too large.
+    smash_core::logging::ensure_log_dir(&log_path).ok();
+    smash_core::logging::rotate_log_files(
+        &log_path,
+        smash_core::logging::DEFAULT_MAX_LOG_SIZE,
+        smash_core::logging::DEFAULT_MAX_LOG_FILES,
+    )
+    .ok();
+
+    // Determine the tracing filter level from config.
+    let filter_str = match &config.log.level {
+        smash_config::config::LogLevel::Trace => "trace",
+        smash_config::config::LogLevel::Debug => "debug",
+        smash_config::config::LogLevel::Info => "info",
+        smash_config::config::LogLevel::Warn => "warn",
+        smash_config::config::LogLevel::Error => "error",
+    };
+
+    // Open log file (append, not truncate) so rotated history is preserved.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
         .unwrap_or_else(|_| std::fs::File::create("/dev/null").expect("cannot open /dev/null"));
+
+    let env_filter = tracing_subscriber::EnvFilter::try_new(filter_str)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
     tracing_subscriber::fmt()
         .with_writer(std::sync::Mutex::new(log_file))
         .with_ansi(false)
+        .with_env_filter(env_filter)
         .init();
 
-    let config_dir = paths.config_dir();
-    let project_dir = std::env::current_dir().ok();
-    let config = load_config(&config_dir, project_dir.as_deref()).unwrap_or_else(|e| {
-        error!("config load failed, using defaults: {}", e);
-        smash_config::Config::default()
-    });
+    info!("smash starting – log level: {}", filter_str);
 
     let _platform = Platform::default_platform().context("failed to initialize platform")?;
 
@@ -1672,6 +1745,7 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
         lsp_evt_rx,
         config.lsp.enabled,
         config.lsp.servers.clone(),
+        config.editor.option_as_alt,
     )?;
 
     // Start LSP for initial file if configured
@@ -1717,6 +1791,17 @@ fn run_editor(file: Option<PathBuf>) -> Result<()> {
             }
 
             if let Some(input) = smash_input::event::from_crossterm(raw_event) {
+                // Normalize macOS Option key to Alt when configured
+                let input = if app.option_as_alt {
+                    match input {
+                        smash_input::InputEvent::Key(ke) => smash_input::InputEvent::Key(
+                            smash_input::event::normalize_macos_option_key(ke),
+                        ),
+                        other => other,
+                    }
+                } else {
+                    input
+                };
                 // Handle Esc to cancel prompts
                 if let smash_input::InputEvent::Key(ke) = &input {
                     if ke.key == smash_input::Key::Esc && app.input_mode != InputMode::Normal {
@@ -1783,6 +1868,17 @@ async fn lsp_manager_task(
                     let mut reg = registry.lock().await;
                     match reg.start_server(config).await {
                         Ok(_id) => {
+                            // Wire diagnostic callback so updates reach the UI.
+                            if let Some(client) = reg.get(&lang) {
+                                let diag_store = client.diagnostics();
+                                let diag_tx = evt_tx.clone();
+                                diag_store.lock().await.set_on_update(move |uri, diags| {
+                                    let _ = diag_tx.send(LspEvent::DiagnosticsUpdated {
+                                        uri: uri.to_string(),
+                                        diagnostics: diags.to_vec(),
+                                    });
+                                });
+                            }
                             let _ = evt_tx.send(LspEvent::ServerStarted(lang));
                         }
                         Err(e) => {
@@ -2104,6 +2200,7 @@ mod tests {
             lsp_evt_rx,
             false,
             std::collections::HashMap::new(),
+            false,
         )
         .unwrap()
     }

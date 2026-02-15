@@ -9,6 +9,45 @@ A high-performance terminal text editor for software developers, written in Rust
 - **Flexible**: Vim mode, configurable keybindings, per-project settings
 - **Modern**: Integrated terminal emulator, real-time collaboration (CRDT), remote development (SSH/WSL), DAP debugging
 
+## Features
+
+### Core Editing
+- Rope-backed buffer with unlimited undo/redo tree
+- Multi-cursor editing with add-cursor-at-next-match
+- Column (rectangular) selection
+- Find & replace with regex support
+- Bracket matching and auto-close
+- UTF-8 with CJK wide-character support
+
+### Language Intelligence (LSP)
+- Diagnostics, completion, hover information
+- Go to definition, find references, rename symbol
+- Code actions, signature help, formatting
+- Supports multiple concurrent LSP servers
+
+### Syntax Highlighting
+- Tree-sitter–based incremental parsing
+- 16+ languages out of the box
+
+### Integrated Terminal
+- Embedded terminal emulator pane (xterm-256color)
+- VT escape sequence parser (CSI, SGR, OSC)
+- Hyperlink detection (URLs and file paths)
+- Multiple simultaneous terminal instances
+- Clipboard integration between editor and terminal
+
+### Debugging (DAP)
+- Debug Adapter Protocol client
+- Breakpoints: line, conditional, hit-count, logpoints
+- Step over / into / out, continue, pause
+- Stack trace, scopes, and variable inspection
+- Expression evaluation
+
+### Reliability
+- Crash recovery via swap files (`.smash-swap`)
+- Auto-save with configurable interval (default 30 s)
+- Structured logging with file rotation
+
 ## Quick Start
 
 ### Build
@@ -115,21 +154,17 @@ preset = "emacs"
 smash/
 ├── Cargo.toml              # Workspace root
 ├── crates/
-│   ├── smash-core/         # Buffer (rope), undo tree, cursor, selection, edit ops
+│   ├── smash-core/         # Buffer (rope), undo tree, cursor, selection,
+│   │                       #   multi-cursor, column selection, recovery, logging
 │   ├── smash-syntax/       # Tree-sitter integration, grammar loading
 │   ├── smash-lsp/          # LSP client, JSON-RPC transport
-│   ├── smash-terminal/     # Embedded terminal emulator
-│   ├── smash-collab/       # CRDT engine, signaling protocol
-│   ├── smash-remote/       # SSH tunneling, remote agent protocol
+│   ├── smash-terminal/     # Embedded terminal emulator (VT parser, grid, PTY)
 │   ├── smash-dap/          # Debug Adapter Protocol client
 │   ├── smash-config/       # Config parsing, validation, live reload
-│   ├── smash-plugin/       # WASM plugin host and API
 │   ├── smash-tui/          # TUI renderer (crossterm backend)
 │   ├── smash-platform/     # OS abstraction (clipboard, paths, signals)
 │   └── smash-input/        # Keybinding engine, command dispatch
 ├── src/main.rs             # Binary entry point
-├── grammars/               # Vendored Tree-sitter grammars
-├── themes/                 # Built-in theme files (.toml)
 ├── doc/                    # Requirements, design plan, coding rules
 └── tests/                  # Integration / end-to-end tests
 ```
@@ -148,10 +183,25 @@ cargo test --workspace
 
 # Run tests for a single crate
 cargo test -p smash-core
+cargo test -p smash-terminal
+cargo test -p smash-dap
+
+# Code coverage (requires cargo-llvm-cov)
+cargo llvm-cov --workspace --summary-only
 
 # Check docs build cleanly
 cargo doc --no-deps --document-private-items
 ```
+
+## Phased Delivery
+
+| Phase | Status | Scope |
+|---|---|---|
+| 1 — Core Editor (MVP) | ✅ Done | Rope buffer, undo tree, TUI renderer, syntax highlighting, file I/O, find & replace, splits |
+| 2 — LSP & Navigation | ✅ Done | LSP client, diagnostics, completion, hover, go-to-def, fuzzy finder, Vim/Emacs modes |
+| 3 — Terminal & Debugging | ✅ Done | Embedded terminal, DAP client, multi-cursor, column selection, crash recovery, logging |
+| 4 — Collaboration & Remote | Planned | CRDT engine, collaboration signaling, SSH remote agent, WSL |
+| 5 — Plugins & Polish | Planned | WASM plugin host, GUI mode prototype, accessibility, encoding detection |
 
 ## License
 

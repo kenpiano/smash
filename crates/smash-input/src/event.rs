@@ -74,6 +74,12 @@ impl KeyEvent {
             modifiers: Modifiers::CTRL,
         }
     }
+    pub fn alt(c: char) -> Self {
+        Self {
+            key: Key::Char(c),
+            modifiers: Modifiers::ALT,
+        }
+    }
 }
 
 impl fmt::Display for KeyEvent {
@@ -132,6 +138,99 @@ pub enum InputEvent {
     Mouse(MouseEvent),
     Resize(u16, u16),
     Paste(String),
+}
+
+/// Map a macOS Option-produced Unicode character back to its original
+/// ASCII key. On US-QWERTY macOS keyboards, pressing Option+key
+/// produces a special Unicode character (e.g. Option+f → ƒ). This
+/// table maps those characters back so they can be treated as Alt+key.
+///
+/// Returns `Some((original_char, is_shifted))` if the character is a
+/// known macOS Option mapping, `None` otherwise.
+fn macos_option_char_to_key(c: char) -> Option<(char, bool)> {
+    // US-QWERTY Option key mappings (unshifted)
+    match c {
+        'å' => Some(('a', false)),
+        '∫' => Some(('b', false)),
+        'ç' => Some(('c', false)),
+        '∂' => Some(('d', false)),
+        'ƒ' => Some(('f', false)),
+        '©' => Some(('g', false)),
+        '˙' => Some(('h', false)),
+        '∆' => Some(('j', false)),
+        '˚' => Some(('k', false)),
+        '¬' => Some(('l', false)),
+        'µ' => Some(('m', false)),
+        'ø' => Some(('o', false)),
+        'π' => Some(('p', false)),
+        'œ' => Some(('q', false)),
+        '®' => Some(('r', false)),
+        'ß' => Some(('s', false)),
+        '†' => Some(('t', false)),
+        '√' => Some(('v', false)),
+        '∑' => Some(('w', false)),
+        '≈' => Some(('x', false)),
+        '¥' => Some(('y', false)),
+        'Ω' => Some(('z', false)),
+        // Punctuation
+        '≤' => Some(('<', false)),
+        '≥' => Some(('>', false)),
+        '÷' => Some(('/', false)),
+        '…' => Some(('.', false)),
+        '¿' => Some(('?', false)),
+        // Option+Shift variants
+        'Å' => Some(('a', true)),
+        'ı' => Some(('b', true)),
+        'Ç' => Some(('c', true)),
+        'Î' => Some(('d', true)),
+        'Ï' => Some(('f', true)),
+        '˝' => Some(('g', true)),
+        'Ó' => Some(('h', true)),
+        'Ô' => Some(('j', true)),
+        '\u{F8FF}' => Some(('k', true)), // Apple logo
+        'Ò' => Some(('l', true)),
+        'Â' => Some(('m', true)),
+        'Ø' => Some(('o', true)),
+        '∏' => Some(('p', true)),
+        'Œ' => Some(('q', true)),
+        '‰' => Some(('r', true)),
+        'Í' => Some(('s', true)),
+        'ˇ' => Some(('t', true)),
+        '◊' => Some(('v', true)),
+        '„' => Some(('w', true)),
+        '˛' => Some(('x', true)),
+        'Á' => Some(('y', true)),
+        '¸' => Some(('z', true)),
+        _ => None,
+    }
+}
+
+/// Normalize a [`KeyEvent`] for macOS Option-as-Alt behaviour.
+///
+/// When macOS Terminal.app (or similar) sends a Unicode character
+/// produced by the Option key, this function maps it back to the
+/// original key with the [`Modifiers::ALT`] flag set. This allows
+/// Alt-based keybindings (e.g. Emacs Alt-f for word-forward) to
+/// work correctly on macOS without requiring terminal configuration.
+///
+/// Call this on every [`KeyEvent`] *before* passing it to the
+/// key resolver. It is a no-op on non-macOS platforms.
+pub fn normalize_macos_option_key(mut event: KeyEvent) -> KeyEvent {
+    // Only normalize plain characters (no existing modifiers) or
+    // characters that already have SHIFT but nothing else.
+    if event.modifiers != Modifiers::NONE && event.modifiers != Modifiers::SHIFT {
+        return event;
+    }
+    if let Key::Char(c) = event.key {
+        if let Some((original, shifted)) = macos_option_char_to_key(c) {
+            event.key = Key::Char(original);
+            event.modifiers = Modifiers::ALT;
+            if shifted {
+                event.modifiers = event.modifiers | Modifiers::SHIFT;
+            }
+        }
+    }
+    event
 }
 
 /// Convert crossterm events to our normalized InputEvent
@@ -632,5 +731,201 @@ mod tests {
             KeyEvent::new(Key::Null, Modifiers::NONE).to_string(),
             "Null"
         );
+    }
+
+    // ── KeyEvent::alt() constructor ────────────────────────────
+
+    #[test]
+    fn key_event_alt_constructor_sets_alt() {
+        let ke = KeyEvent::alt('f');
+        assert_eq!(ke.key, Key::Char('f'));
+        assert!(ke.modifiers.alt());
+        assert!(!ke.modifiers.ctrl());
+        assert!(!ke.modifiers.shift());
+    }
+
+    // ── macOS Option key normalization ────────────────────────
+
+    #[test]
+    fn normalize_option_f_to_alt_f() {
+        // Option+f on macOS Terminal.app produces 'ƒ' (U+0192)
+        let input = KeyEvent::char('\u{0192}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('f'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_b_to_alt_b() {
+        // Option+b → '∫' (U+222B)
+        let input = KeyEvent::char('\u{222B}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('b'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_v_to_alt_v() {
+        // Option+v → '√' (U+221A)
+        let input = KeyEvent::char('\u{221A}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('v'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_x_to_alt_x() {
+        // Option+x → '≈' (U+2248)
+        let input = KeyEvent::char('\u{2248}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('x'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_less_than() {
+        // Option+< → '≤' (U+2264)
+        let input = KeyEvent::char('\u{2264}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('<'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_greater_than() {
+        // Option+> → '≥' (U+2265)
+        let input = KeyEvent::char('\u{2265}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('>'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_period() {
+        // Option+. → '…' (U+2026)
+        let input = KeyEvent::char('\u{2026}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('.'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_slash() {
+        // Option+/ → '÷' (U+00F7)
+        let input = KeyEvent::char('\u{00F7}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('/'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_question() {
+        // Option+? → '¿' (U+00BF)
+        let input = KeyEvent::char('\u{00BF}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('?'));
+        assert!(result.modifiers.alt());
+    }
+
+    #[test]
+    fn normalize_option_shift_a() {
+        // Option+Shift+a → 'Å' (U+00C5)
+        let input = KeyEvent::char('\u{00C5}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('a'));
+        assert!(result.modifiers.alt());
+        assert!(result.modifiers.shift());
+    }
+
+    #[test]
+    fn normalize_option_shift_p() {
+        // Option+Shift+p → '∏' (U+220F)
+        let input = KeyEvent::char('\u{220F}');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result.key, Key::Char('p'));
+        assert!(result.modifiers.alt());
+        assert!(result.modifiers.shift());
+    }
+
+    #[test]
+    fn normalize_plain_ascii_unchanged() {
+        let input = KeyEvent::char('a');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn normalize_ctrl_char_unchanged() {
+        // Characters with existing Ctrl modifier should not be touched
+        let input = KeyEvent::ctrl('f');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn normalize_already_alt_unchanged() {
+        // Character already flagged as Alt should not be double-modified
+        let input = KeyEvent::alt('f');
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn normalize_non_key_event_unchanged() {
+        // Non-Char keys should pass through
+        let input = KeyEvent::new(Key::Enter, Modifiers::NONE);
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn normalize_unknown_unicode_unchanged() {
+        // A Unicode char not in the macOS Option table should pass through
+        let input = KeyEvent::char('\u{1F600}'); // 😀
+        let result = normalize_macos_option_key(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn normalize_all_alpha_option_keys() {
+        // Verify all lowercase alpha Option mappings
+        let pairs = [
+            ('\u{00e5}', 'a'), // å
+            ('\u{222b}', 'b'), // ∫
+            ('\u{00e7}', 'c'), // ç
+            ('\u{2202}', 'd'), // ∂
+            ('\u{0192}', 'f'), // ƒ
+            ('\u{00a9}', 'g'), // ©
+            ('\u{02d9}', 'h'), // ˙
+            ('\u{2206}', 'j'), // ∆
+            ('\u{02da}', 'k'), // ˚
+            ('\u{00ac}', 'l'), // ¬
+            ('\u{00b5}', 'm'), // µ
+            ('\u{00f8}', 'o'), // ø
+            ('\u{03c0}', 'p'), // π
+            ('\u{0153}', 'q'), // œ
+            ('\u{00ae}', 'r'), // ®
+            ('\u{00df}', 's'), // ß
+            ('\u{2020}', 't'), // †
+            ('\u{221a}', 'v'), // √
+            ('\u{2211}', 'w'), // ∑
+            ('\u{2248}', 'x'), // ≈
+            ('\u{00a5}', 'y'), // ¥
+            ('\u{03a9}', 'z'), // Ω
+        ];
+        for (unicode, expected) in pairs {
+            let result = normalize_macos_option_key(KeyEvent::char(unicode));
+            assert_eq!(
+                result.key,
+                Key::Char(expected),
+                "Option+{expected} mapping failed for U+{:04X}",
+                unicode as u32
+            );
+            assert!(result.modifiers.alt(), "ALT not set for Option+{expected}");
+            assert!(
+                !result.modifiers.shift(),
+                "SHIFT should not be set for Option+{expected}"
+            );
+        }
     }
 }

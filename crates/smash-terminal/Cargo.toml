@@ -1,15 +1,13 @@
 [package]
-name = "smash-core"
+name = "smash-terminal"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-ropey = { workspace = true }
-regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+smash-input = { path = "../smash-input" }
 
 [dev-dependencies]
-tempfile = "3"

@@ -90,6 +90,12 @@ pub struct EditorConfig {
     /// Remove trailing whitespace on save.
     #[serde(default)]
     pub trim_trailing_whitespace: bool,
+    /// Treat the macOS Option key as Alt for keybindings.
+    /// When true, Unicode characters produced by Option+key on macOS
+    /// (e.g. Option+f → ƒ) are normalised back to Alt+key.
+    /// Defaults to `true` on macOS, `false` elsewhere.
+    #[serde(default = "default_option_as_alt")]
+    pub option_as_alt: bool,
 }
 
 fn default_tab_size() -> u8 {
@@ -97,6 +103,10 @@ fn default_tab_size() -> u8 {
 }
 fn default_true() -> bool {
     true
+}
+
+fn default_option_as_alt() -> bool {
+    cfg!(target_os = "macos")
 }
 
 impl Default for EditorConfig {
@@ -109,6 +119,7 @@ impl Default for EditorConfig {
             auto_indent: true,
             auto_close_brackets: true,
             trim_trailing_whitespace: false,
+            option_as_alt: default_option_as_alt(),
         }
     }
 }
@@ -255,6 +266,7 @@ mod tests {
         assert!(cfg.editor.auto_indent);
         assert!(cfg.editor.auto_close_brackets);
         assert!(!cfg.editor.trim_trailing_whitespace);
+        assert_eq!(cfg.editor.option_as_alt, cfg!(target_os = "macos"));
         assert_eq!(cfg.display.theme, "dark");
         assert_eq!(cfg.display.line_numbers, LineNumberMode::Absolute,);
         assert!(!cfg.display.show_minimap);
@@ -277,6 +289,7 @@ mod tests {
                 auto_indent: false,
                 auto_close_brackets: false,
                 trim_trailing_whitespace: true,
+                option_as_alt: true,
             },
             display: DisplayConfig {
                 theme: "light".into(),

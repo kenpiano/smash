@@ -8,6 +8,8 @@ members = [
     "crates/smash-syntax",
     "crates/smash-tui",
     "crates/smash-lsp",
+    "crates/smash-terminal",
+    "crates/smash-dap",
 ]
 
 [workspace.package]
@@ -44,8 +46,10 @@ smash-input = { path = "crates/smash-input" }
 smash-syntax = { path = "crates/smash-syntax" }
 smash-tui = { path = "crates/smash-tui" }
 smash-lsp = { path = "crates/smash-lsp" }
+smash-terminal = { path = "crates/smash-terminal" }
+smash-dap = { path = "crates/smash-dap" }
 crossterm = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
