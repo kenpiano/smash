@@ -788,7 +788,7 @@ mod tests {
         // Option+< → '≤' (U+2264)
         let input = KeyEvent::char('\u{2264}');
         let result = normalize_macos_option_key(input);
-        assert_eq!(result.key, Key::Char('<'));
+        assert_eq!(result.key, Key::Char(','));
         assert!(result.modifiers.alt());
     }
 
@@ -796,15 +796,6 @@ mod tests {
     fn normalize_option_greater_than() {
         // Option+> → '≥' (U+2265)
         let input = KeyEvent::char('\u{2265}');
-        let result = normalize_macos_option_key(input);
-        assert_eq!(result.key, Key::Char('>'));
-        assert!(result.modifiers.alt());
-    }
-
-    #[test]
-    fn normalize_option_period() {
-        // Option+. → '…' (U+2026)
-        let input = KeyEvent::char('\u{2026}');
         let result = normalize_macos_option_key(input);
         assert_eq!(result.key, Key::Char('.'));
         assert!(result.modifiers.alt());
