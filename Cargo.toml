@@ -7,6 +7,7 @@ members = [
     "crates/smash-input",
     "crates/smash-syntax",
     "crates/smash-tui",
+    "crates/smash-lsp",
 ]
 
 [workspace.package]
@@ -23,6 +24,8 @@ crossterm = "0.28"
 ropey = "1"
 regex = "1"
 toml = "0.8"
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
 
 [package]
 name = "smash"
@@ -40,7 +43,9 @@ smash-config = { path = "crates/smash-config" }
 smash-input = { path = "crates/smash-input" }
 smash-syntax = { path = "crates/smash-syntax" }
 smash-tui = { path = "crates/smash-tui" }
+smash-lsp = { path = "crates/smash-lsp" }
 crossterm = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
 anyhow = "1"

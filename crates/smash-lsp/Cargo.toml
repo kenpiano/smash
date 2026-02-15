@@ -1,0 +1,15 @@
+[package]
+name = "smash-lsp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+smash-core = { path = "../smash-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread", "test-util"] }
