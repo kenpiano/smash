@@ -65,25 +65,26 @@ cargo install --path .
 | `Tab` | Insert tab |
 | `Esc` | Cancel prompt |
 
-### Vim Mode
+### Emacs Mode
 
-Set `keymap.preset = "vim"` in your config to enable Vim-style keybindings. In Normal mode:
+Set `keymap.preset = "emacs"` in your config to enable Emacs-style keybindings. No modal switching — all bindings use modifiers:
 
 | Key | Action |
 |---|---|
-| `h` `j` `k` `l` | Move left / down / up / right |
-| `w` / `b` | Word forward / backward |
-| `0` / `$` | Line start / end |
-| `gg` / `G` | Buffer start / end |
-| `x` | Delete character |
-| `dd` | Delete line |
-| `u` | Undo |
-| `Ctrl+R` | Redo |
-| `/` | Find |
-| `n` / `N` | Find next / previous |
-| `:` | Command palette |
-| `i` / `a` / `o` | Enter insert mode |
-| `Esc` | Return to Normal mode (from Insert) |
+| `Ctrl-f` / `Ctrl-b` | Forward / backward character |
+| `Ctrl-n` / `Ctrl-p` | Next / previous line |
+| `Ctrl-a` / `Ctrl-e` | Beginning / end of line |
+| `Alt-f` / `Alt-b` | Forward / backward word |
+| `Ctrl-v` / `Alt-v` | Page down / page up |
+| `Alt-<` / `Alt->` | Beginning / end of buffer |
+| `Ctrl-d` | Delete forward character |
+| `Ctrl-k` | Kill (delete) line |
+| `Ctrl-s` | Incremental search |
+| `Ctrl-r` | Reverse search |
+| `Alt-x` | Command palette (M-x) |
+| `Ctrl-x Ctrl-s` | Save |
+| `Ctrl-x Ctrl-c` | Quit |
+| `Ctrl-x Ctrl-f` | Open file |
 
 ## Configuration
 
@@ -105,7 +106,7 @@ theme = "dark"
 line_numbers = "relative"
 
 [keymap]
-preset = "vim"
+preset = "emacs"
 ```
 
 ## Repository Layout

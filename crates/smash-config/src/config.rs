@@ -285,7 +285,7 @@ mod tests {
                 cursor_blink: false,
             },
             keymap: KeymapConfig {
-                preset: "vim".into(),
+                preset: "emacs".into(),
             },
             terminal_shell: Some("/bin/bash".into()),
             log: LogConfig {
