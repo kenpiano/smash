@@ -88,8 +88,8 @@ This document describes the high-level architecture, technology choices, module 
 | Module | Responsibility | Key Interfaces |
 |---|---|---|
 | **Platform Abstraction** | OS-specific file paths, process spawning, clipboard, signal handling | `trait Platform` |
-| **Input Handler** | Keyboard/mouse event normalization, keybinding resolution, command dispatch | `Event → Command` mapping |
-| **Editor Core** | Buffer management (rope), cursor/selection state, undo tree, edit operations | `Buffer`, `EditCommand`, `UndoTree` |
+| **Input Handler** | Keyboard/mouse event normalization, keybinding resolution, command dispatch, IME composition lifecycle management (preedit/commit) | `Event → Command` mapping, `ImeState` |
+| **Editor Core** | Buffer management (rope), cursor/selection state (with position clamping), undo tree, edit operations | `Buffer`, `EditCommand`, `UndoTree` |
 | **Renderer** | Viewport calculation, styled line layout, diff-based terminal updates | `trait Renderer` (TUI impl, future GUI impl) |
 | **Tree-sitter Highlighter** | Incremental parse, highlight query execution, token span output | `highlight(buffer, edit_range) → Spans` |
 | **LSP Client** | JSON-RPC transport, capability negotiation, request/response dispatch | `LspClient` per server instance |
@@ -107,16 +107,23 @@ This document describes the high-level architecture, technology choices, module 
 ### 4.1 Edit Cycle (Main Loop)
 
 ```
-1. Platform polls input events (key, mouse, resize)
-2. Input Handler resolves keybinding → Command
-3. Command dispatched to Editor Core
-4. Editor Core applies edit to Buffer (rope mutation)
-5. Undo Tree records operation
-6. Tree-sitter Highlighter receives edit notification → incremental re-parse
-7. LSP Client notified of didChange → sends to language server
-8. Collaboration engine (if active) broadcasts CRDT operation
-9. Renderer reads buffer + highlights + diagnostics → produces frame diff
+1.  Platform polls input events (key, mouse, resize, IME composition)
+2.  Input Handler checks IME state:
+    2a. If IME preedit event → update ImeState (composition string + cursor + segments)
+        → skip keybinding resolution, notify Renderer to display preedit overlay
+    2b. If IME commit event → extract committed string, clear ImeState,
+        proceed as a regular insert command
+    2c. If regular key event and no active composition → resolve keybinding → Command
+3.  Command dispatched to Editor Core
+4.  Editor Core applies edit to Buffer (rope mutation)
+5.  Undo Tree records operation (IME commit = single atomic undo entry)
+6.  Tree-sitter Highlighter receives edit notification → incremental re-parse
+7.  LSP Client notified of didChange → sends to language server
+8.  Collaboration engine (if active) broadcasts CRDT operation
+9.  Renderer reads buffer + highlights + diagnostics + ImeState → produces frame diff
+    (preedit string rendered inline with composition styling)
 10. Platform flushes frame diff to terminal
+    (reports cursor position to OS IME API for candidate window placement)
 ```
 
 ### 4.2 LSP Request Cycle
@@ -198,6 +205,25 @@ This minimizes I/O and achieves ≤ 16 ms frame times even over SSH.
 - Plugins cannot access the filesystem or network unless explicitly granted permissions in the manifest.
 - A crashed plugin is terminated without affecting the editor.
 
+### 6.6 Japanese IME Handling
+IME input follows a **composition lifecycle** distinct from regular keystroke processing:
+
+1. **Preedit Start**: The platform signals that an IME composition session has begun. The Input Handler enters IME mode and suppresses normal keybinding resolution.
+2. **Preedit Update**: The platform provides the current composition string (e.g., uncommitted hiragana/katakana), segment attributes (unconverted, converted, active clause), and an in-composition cursor offset. The Renderer displays this preedit text inline at the buffer cursor with distinct styling (underline, highlight per segment).
+3. **Commit**: The platform delivers the final converted string (e.g., kanji). The Input Handler creates a single `InsertText` command. The Undo Tree records this as one atomic operation.
+4. **Cancel**: The user cancels composition (e.g., Escape). The preedit overlay is removed; the buffer is unchanged.
+
+**TUI mode**: IME composition is handled by the host terminal emulator. The editor receives already-committed multi-byte UTF-8 sequences via standard input. The editor must correctly handle variable-length UTF-8, fullwidth character column widths (`wcwidth`), and avoid splitting multi-byte sequences across reads.
+
+**GUI mode (future)**: The editor integrates directly with platform IME APIs:
+- **macOS**: NSTextInputClient protocol (IMKit).
+- **Linux**: IBus / Fcitx via DBus or Wayland `text-input-v3` protocol.
+- **Windows**: TSF (Text Services Framework) or legacy IMM32.
+
+The `Renderer` reports the cursor's screen-space coordinates to the platform layer on every frame so the OS can position the IME candidate window correctly, even during scrolling or layout changes.
+
+**Wide character handling**: CJK characters occupy two terminal columns. The Renderer's column-width calculation uses Unicode East Asian Width properties (UAX #11) to ensure correct alignment. The rope's column-index API accounts for double-width characters when computing cursor positions.
+
 ---
 
 ## 7. Phased Delivery Plan
@@ -216,6 +242,7 @@ This minimizes I/O and achieves ≤ 16 ms frame times even over SSH.
 | Large file support (mmap) | REQ-PERF-020, 021, 022 |
 | Multiple buffers / splits | REQ-EDIT-003, REQ-THEME-004 |
 | Find & replace (plain + regex) | REQ-EDIT-021 |
+| Japanese IME support (TUI: terminal passthrough, wide-char rendering) | REQ-IME-001 – 004, 020 – 022, 031, 043 |
 | Cross-platform builds (Linux, macOS, Windows) | REQ-PLAT-001, 010, 011 |
 
 **Target**: 3 months

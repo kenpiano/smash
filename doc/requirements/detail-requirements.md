@@ -60,6 +60,7 @@ This document expands the high-level requirements defined in `smash-requirements
 - **REQ-EDIT-012**: The editor SHOULD support other encodings (Latin-1, Shift-JIS, etc.) via explicit selection or auto-detection.
 
 ### 3.3 Editing Features
+- **REQ-EDIT-019**: Vertical cursor movement (up, down, page-up, page-down) SHALL clamp the cursor column to the length of the target line to prevent out-of-bounds cursor positions.
 - **REQ-EDIT-020**: Multiple cursors / multi-selection editing SHALL be supported.
 - **REQ-EDIT-021**: Find & replace SHALL support plain text and regular expressions, with match highlighting.
 - **REQ-EDIT-022**: The editor SHALL support rectangular (column) selection.
@@ -188,6 +189,38 @@ This document expands the high-level requirements defined in `smash-requirements
 
 ---
 
+## 13A. Japanese IME (Input Method Editor) Support
+
+### 13A.1 Composition Lifecycle
+- **REQ-IME-001**: The editor SHALL support IME composition events (preedit start, preedit update, preedit end / commit) on all supported platforms (macOS, Linux, Windows).
+- **REQ-IME-002**: During IME composition (preedit state), the editor SHALL display the uncommitted composition string inline at the cursor position with a distinct visual style (e.g., underline, highlighted background) to distinguish it from committed text.
+- **REQ-IME-003**: The editor SHALL NOT interpret raw keystrokes as editing commands while an IME composition session is active. Only the final committed string SHALL be inserted into the buffer.
+- **REQ-IME-004**: Pressing Escape or other cancel keys during composition SHALL discard the preedit text without modifying the buffer.
+
+### 13A.2 Candidate Window & Cursor Positioning
+- **REQ-IME-010**: The editor SHALL report the correct cursor screen coordinates to the platform IME API so that the candidate/conversion window appears adjacent to the composition point.
+- **REQ-IME-011**: Cursor coordinate reporting SHALL remain accurate during scrolling, window resizing, and split-pane layout changes.
+- **REQ-IME-012**: The candidate window positioning SHALL work correctly in both TUI mode (via terminal IME passthrough) and a future GUI mode (via native platform IME APIs).
+
+### 13A.3 Rendering & Performance
+- **REQ-IME-020**: Preedit string rendering SHALL complete within the ≤ 16 ms frame budget (no visual lag during composition).
+- **REQ-IME-021**: The preedit display SHALL support styled segments (e.g., unconverted kana underlined, converted kanji with solid underline, currently selected clause highlighted) when the platform provides segment attributes.
+- **REQ-IME-022**: Wide (fullwidth) characters produced by IME input SHALL be rendered with correct double-column-width handling, maintaining alignment of subsequent text on the same line.
+
+### 13A.4 Integration with Editor Features
+- **REQ-IME-030**: IME composition SHALL work correctly with multi-cursor editing; each cursor SHALL maintain its own independent composition state.
+- **REQ-IME-031**: Undo SHALL treat a single IME commit as one atomic operation (one undo step reverses the entire committed string, not individual keystrokes within composition).
+- **REQ-IME-032**: IME-committed text SHALL trigger LSP `textDocument/didChange` notifications and Tree-sitter incremental re-parse, identical to regular typed text.
+- **REQ-IME-033**: IME composition SHALL function correctly inside the command palette and find/replace input fields, not only in buffer editing mode.
+
+### 13A.5 Platform-Specific Considerations
+- **REQ-IME-040**: On macOS, the editor SHALL integrate with the macOS Input Method Kit (IMKit) or the Cocoa text input protocol when running in GUI mode.
+- **REQ-IME-041**: On Linux, the editor SHALL support at least one major IME framework: IBus, Fcitx, or Fcitx5 (via XIM, Wayland text-input protocol, or DBus interface as appropriate).
+- **REQ-IME-042**: On Windows, the editor SHALL support the TSF (Text Services Framework) or IMM32 API for IME interaction in GUI mode.
+- **REQ-IME-043**: In TUI mode, the editor SHALL delegate IME handling to the host terminal emulator; it SHALL correctly process multi-byte UTF-8 character sequences that result from terminal-level IME composition.
+
+---
+
 ## 14. Configuration
 
 - **REQ-CONF-001**: Global configuration SHALL be stored in a single file (TOML or JSON) at a platform-standard location (e.g., `~/.config/smash/config.toml`).
@@ -234,5 +267,6 @@ This document expands the high-level requirements defined in `smash-requirements
 | Remote Dev | REQ-REMOTE-001 – 005 | Remote development (SSH, WSL) |
 | Plugins | REQ-PLUG-001 – 004 | Extensible through plugins (optional) |
 | Keybindings | REQ-KEY-001 – 004 | Customizable keybindings (optional) |
+| Japanese IME | REQ-IME-001 – 043 | Japanese IME support |
 | Configuration | REQ-CONF-001 – 004 | (implied by all configurable features) |
 | Non-Functional | REQ-NFR-001 – 031 | (implied quality attributes) |

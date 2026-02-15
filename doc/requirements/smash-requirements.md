@@ -19,6 +19,7 @@ The basic requirements of SMASH are as follows.
 - Cross-platform compatibility (Windows, macOS, Linux).
 - Support for LSP and syntax highlights.
 - Support for large files (e.g., 100MB+).
+- Support for Japanese IME (Input Method Editor) for composing CJK text.
 
 ## ADVANCED REQUIREMENTS
 The advanced requirements of SMASH are as follows.

@@ -1,5 +1,6 @@
 pub mod command;
 pub mod default_keymap;
+pub mod emacs_keymap;
 pub mod error;
 pub mod event;
 pub mod keymap;
@@ -8,6 +9,7 @@ pub mod vim_keymap;
 
 pub use command::Command;
 pub use default_keymap::create_default_keymap;
+pub use emacs_keymap::create_emacs_keymap;
 pub use error::InputError;
 pub use event::{InputEvent, Key, KeyEvent, Modifiers, MouseEvent};
 pub use keymap::{Keymap, KeymapLayer};

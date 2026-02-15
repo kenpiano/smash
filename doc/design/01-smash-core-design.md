@@ -165,6 +165,17 @@ This ensures that even long editing sessions on a single buffer keep undo memory
 - Multi-cursor edits produce a `Batch` of `EditCommand`s, one per cursor.
 - Operations: move (by char, word, line, paragraph, start/end), select (extend), add cursor at next match.
 
+#### Position Clamping
+
+All vertical cursor movement (`MoveUp`, `MoveDown`, `PageUp`, `PageDown`) MUST clamp the cursor column to the length of the target line. This prevents the cursor from landing past the end of a shorter line.
+
+`Buffer::clamp_position(pos: Position) -> Position` is the canonical helper:
+
+- **Line** is clamped to `[0, line_count - 1]`.
+- **Column** is clamped to `[0, max_col]`, where `max_col` is `line_len_chars - 1` for lines with a trailing newline, or `line_len_chars` for the last line.
+
+This method MUST be used by all movement code that changes the cursor's line without recalculating the column from scratch.
+
 ### 3.7 Search
 
 - `SearchQuery::Plain(String)` — case-sensitive/insensitive toggle.

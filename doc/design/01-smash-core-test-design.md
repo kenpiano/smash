@@ -84,6 +84,16 @@ Test strategy for `smash-core`, the most critical crate in SMASH. Requires ≥ 8
 | `cursor_move_left_at_bol_wraps` | Move left at start of line | Previous line, end |
 | `cursor_move_down_preserves_column` | Move down | Same column, next line |
 | `cursor_move_down_clamps_short_line` | Move down to shorter line | Column clamped |
+
+### 3.5a `buffer.rs` — Position Clamping
+
+| Test Name | Scenario | Expected |
+|---|---|---|
+| `clamp_position_col_within_line_unchanged` | Position within bounds | Returned unchanged |
+| `clamp_position_col_exceeds_shorter_line` | Col beyond line length | Col clamped to line length |
+| `clamp_position_line_exceeds_buffer` | Line beyond buffer end | Line clamped to last line |
+| `clamp_position_empty_buffer` | Any position on empty buffer | Returns (0, 0) |
+| `clamp_position_on_line_with_newline` | Col beyond non-last line | Col clamped before trailing newline |
 | `cursor_move_word_skips_whitespace` | Move by word on "foo  bar" | Lands on "bar" |
 | `cursorset_add_cursor` | Add second cursor | Set has 2 cursors |
 | `cursorset_merge_overlapping` | Add cursor at same position | De-duplicated to 1 |
