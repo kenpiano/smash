@@ -1,0 +1,11 @@
+[package]
+name = "smash-input"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+smash-core = { path = "../smash-core" }
+smash-config = { path = "../smash-config" }
+crossterm = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

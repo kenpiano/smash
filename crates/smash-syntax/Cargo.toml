@@ -1,0 +1,10 @@
+[package]
+name = "smash-syntax"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+smash-core = { path = "../smash-core" }
+regex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
