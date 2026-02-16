@@ -978,10 +978,9 @@ mod tests {
         buf.cursors_mut().add(Cursor::new(Position::new(0, 8)));
 
         let events = buf.apply_multi_cursor_edit("X").unwrap();
-        // Both positions got "X" inserted
+        // Both positions got "X" inserted; verify the final buffer exactly
         let text = buf.text().to_string();
-        assert!(text.contains("Xfoo"));
-        assert!(text.contains("Xfoo baz") || text.contains("Xfoo"));
+        assert_eq!(text, "Xfoo bar Xfoo baz");
         assert!(events.len() >= 2);
     }
 
