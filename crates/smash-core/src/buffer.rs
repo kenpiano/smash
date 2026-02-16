@@ -374,14 +374,12 @@ impl Buffer {
             prev_line = Some(pos.line);
         }
 
-        // Rebuild cursor set
-        if let Some(first) = new_cursors.into_iter().next() {
-            let cs = CursorSet::new(first);
-            // We only keep primary for now — multi-cursor positions
-            // are complex; the batch edit already applied correctly.
+        // Rebuild cursor set from all updated cursor positions, preserving
+        // their ordering so the first remains the primary cursor.
+        if !new_cursors.is_empty() {
+            let cs: CursorSet = new_cursors.into_iter().collect();
             self.cursors = cs;
         }
-
         Ok(events)
     }
 
