@@ -281,6 +281,108 @@ impl Buffer {
         Ok(line_start + pos.col)
     }
 
+    /// Apply the same text insertion/deletion at every cursor position.
+    /// This creates a Batch of edit commands. Cursors are processed in
+    /// reverse order to preserve position correctness.
+    pub fn apply_multi_cursor_edit(&mut self, text: &str) -> Result<Vec<EditEvent>, EditError> {
+        // Collect cursor info in reverse order (bottom to top)
+        let mut cursor_data: Vec<(Position, Option<Range>)> = self
+            .cursors
+            .iter()
+            .map(|c| (c.position(), c.selection_range()))
+            .collect();
+        // Sort in reverse order by position so edits don't invalidate each other
+        cursor_data.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut cmds = Vec::new();
+        for (pos, sel) in &cursor_data {
+            if let Some(range) = sel {
+                // Has selection: replace selection with text
+                cmds.push(EditCommand::Replace {
+                    range: *range,
+                    text: text.to_string(),
+                });
+            } else {
+                // No selection: insert at cursor position
+                cmds.push(EditCommand::Insert {
+                    pos: *pos,
+                    text: text.to_string(),
+                });
+            }
+        }
+
+        let batch = EditCommand::Batch(cmds);
+        let events = self.apply_edit(batch)?;
+
+        // Update cursor positions: each cursor moves to end of inserted text
+        // We need to recalculate positions after edits
+        // Re-read the rope and place cursors at the end of each insertion
+        // Since edits were applied in reverse order, the rope is now correct.
+        // Build new cursor positions by re-scanning from the original cursors
+        // sorted in forward order.
+        cursor_data.reverse(); // now in forward order
+        let mut new_cursors = Vec::new();
+        let mut line_delta: isize = 0;
+        let mut col_delta: isize = 0;
+        let mut prev_line: Option<usize> = None;
+
+        let text_lines: Vec<&str> = text.split('\n').collect();
+        let text_line_count = text_lines.len();
+        let text_last_line_len = text_lines.last().map_or(0, |l| l.chars().count());
+
+        for (i, (pos, sel)) in cursor_data.iter().enumerate() {
+            // Reset col_delta when we move to a different line
+            if prev_line.is_some() && prev_line != Some(pos.line) {
+                col_delta = 0;
+            }
+
+            let insert_start = if let Some(range) = sel {
+                range.start
+            } else {
+                *pos
+            };
+
+            let sel_char_span = sel.map_or(0, |r| {
+                if r.start.line == r.end.line {
+                    r.end.col as isize - r.start.col as isize
+                } else {
+                    0 // multi-line selection: complex, skip col delta
+                }
+            });
+
+            let adjusted_line = (insert_start.line as isize + line_delta) as usize;
+            let adjusted_col = if i == 0 || prev_line != Some(pos.line) {
+                insert_start.col
+            } else {
+                (insert_start.col as isize + col_delta) as usize
+            };
+
+            let new_end_line = adjusted_line + text_line_count - 1;
+            let new_end_col = if text_line_count > 1 {
+                text_last_line_len
+            } else {
+                adjusted_col + text_last_line_len
+            };
+
+            new_cursors.push(Cursor::new(Position::new(new_end_line, new_end_col)));
+
+            // Update deltas for subsequent cursors on the same line
+            let sel_lines = sel.map_or(0, |r| r.end.line - r.start.line);
+            line_delta += (text_line_count as isize - 1) - sel_lines as isize;
+            col_delta += text.chars().count() as isize - sel_char_span;
+
+            prev_line = Some(pos.line);
+        }
+
+        // Rebuild cursor set from all updated cursor positions, preserving
+        // their ordering so the first remains the primary cursor.
+        if !new_cursors.is_empty() {
+            let cs: CursorSet = new_cursors.into_iter().collect();
+            self.cursors = cs;
+        }
+        Ok(events)
+    }
+
     /// Convert a char index back to a Position.
     fn char_idx_to_position(&self, char_idx: usize) -> Position {
         let line = self.rope.char_to_line(char_idx);
@@ -861,6 +963,52 @@ mod tests {
 
         let buf = Buffer::open_or_create(BufferId::next(), &file_path).unwrap();
         assert_eq!(buf.text().to_string(), "spaced content");
+    }
+
+    // --- Multi-cursor edit tests ---
+
+    #[test]
+    fn multi_cursor_edit_inserts_at_all_positions() {
+        // "foo bar foo baz" with cursors at positions 0 and 8
+        let mut buf = Buffer::from_text(BufferId::next(), "foo bar foo baz");
+        // Set up two cursors
+        buf.cursors = CursorSet::new(Cursor::new(Position::new(0, 0)));
+        buf.cursors_mut().add(Cursor::new(Position::new(0, 8)));
+
+        let events = buf.apply_multi_cursor_edit("X").unwrap();
+        // Both positions got "X" inserted; verify the final buffer exactly
+        let text = buf.text().to_string();
+        assert_eq!(text, "Xfoo bar Xfoo baz");
+        assert!(events.len() >= 2);
+    }
+
+    #[test]
+    fn multi_cursor_edit_with_selections_replaces() {
+        // "hello world hello" — select both "hello" occurrences and replace with "hi"
+        let mut buf = Buffer::from_text(BufferId::next(), "hello world hello");
+        buf.cursors = CursorSet::new(Cursor::with_selection(
+            Position::new(0, 5),
+            Position::new(0, 0),
+        ));
+        buf.cursors_mut().add(Cursor::with_selection(
+            Position::new(0, 17),
+            Position::new(0, 12),
+        ));
+
+        buf.apply_multi_cursor_edit("hi").unwrap();
+        assert_eq!(buf.text().to_string(), "hi world hi");
+    }
+
+    #[test]
+    fn multi_cursor_edit_consistency() {
+        // Inserting at multiple positions on different lines
+        let mut buf = Buffer::from_text(BufferId::next(), "aaa\nbbb\nccc");
+        buf.cursors = CursorSet::new(Cursor::new(Position::new(0, 0)));
+        buf.cursors_mut().add(Cursor::new(Position::new(1, 0)));
+        buf.cursors_mut().add(Cursor::new(Position::new(2, 0)));
+
+        buf.apply_multi_cursor_edit("X").unwrap();
+        assert_eq!(buf.text().to_string(), "Xaaa\nXbbb\nXccc");
     }
 
     #[test]

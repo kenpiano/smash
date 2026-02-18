@@ -12,7 +12,7 @@ pub use backend::{MockBackend, TerminalBackend};
 pub use cell::Cell;
 pub use error::TuiError;
 pub use pane::{PaneId, PaneTree, Rect, SplitDirection};
-pub use renderer::Renderer;
+pub use renderer::{GutterDiagnostic, Renderer};
 pub use screen::Screen;
 pub use style::{Attributes, Color, Style};
 pub use theme::{default_dark_theme, Theme};

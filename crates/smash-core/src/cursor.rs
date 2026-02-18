@@ -118,6 +118,67 @@ impl CursorSet {
         }
     }
 
+    /// Find the next occurrence of `pattern` after the last cursor and add a new cursor there.
+    /// Returns true if a new cursor was added.
+    pub fn add_cursor_at_next_match(&mut self, text: &ropey::Rope, pattern: &str) -> bool {
+        if pattern.is_empty() {
+            return false;
+        }
+
+        let text_str = text.to_string();
+
+        // Find the byte offset just after the last cursor's position (or end of its selection)
+        let last_cursor = self
+            .cursors
+            .iter()
+            .max_by_key(|c| c.selection_range().map_or(c.position(), |r| r.end))
+            .expect("CursorSet always has at least one cursor");
+        let search_from = last_cursor
+            .selection_range()
+            .map_or(last_cursor.position(), |r| r.end);
+        let search_line = search_from.line.min(text.len_lines() - 1);
+        let search_line_start = text.line_to_char(search_line);
+        let search_char_idx = (search_line_start + search_from.col).min(text.len_chars());
+        // Start one character past the last cursor/selection end to avoid re-matching
+        let search_char_idx = (search_char_idx + 1).min(text.len_chars());
+        let search_byte = text.char_to_byte(search_char_idx);
+
+        // Search forward from after the last cursor
+        let found = text_str[search_byte..]
+            .find(pattern)
+            .map(|offset| search_byte + offset);
+
+        // If not found, wrap around from the beginning
+        let found = found.or_else(|| text_str[..search_byte].find(pattern));
+
+        match found {
+            Some(byte_offset) => {
+                let start_char = text.byte_to_char(byte_offset);
+                let end_char = start_char + pattern.chars().count();
+                let start_line = text.char_to_line(start_char);
+                let start_col = start_char - text.line_to_char(start_line);
+                let end_line = text.char_to_line(end_char);
+                let end_col = end_char - text.line_to_char(end_line);
+
+                let start_pos = Position::new(start_line, start_col);
+                let end_pos = Position::new(end_line, end_col);
+
+                // Check that we don't already have a cursor with this exact selection
+                let already_exists = self.cursors.iter().any(|c| {
+                    c.selection_range()
+                        .is_some_and(|r| r.start == start_pos && r.end == end_pos)
+                });
+                if already_exists {
+                    return false;
+                }
+
+                self.add(Cursor::with_selection(end_pos, start_pos));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Sort by position and merge overlapping cursors.
     fn normalize(&mut self) {
         // Sort by position
@@ -405,5 +466,46 @@ mod tests {
         );
         assert_eq!(cs.primary().position(), Position::new(1, 13));
         assert_eq!(cs.primary().anchor().unwrap(), Position::new(1, 8));
+    }
+
+    // --- add_cursor_at_next_match tests ---
+
+    #[test]
+    fn add_cursor_at_next_match_finds_match() {
+        let rope = ropey::Rope::from_str("hello world hello rust");
+        let mut cs = CursorSet::new(Cursor::new(Position::new(0, 0)));
+        let found = cs.add_cursor_at_next_match(&rope, "hello");
+        assert!(found);
+        assert_eq!(cs.len(), 2);
+        // The new cursor should have a selection covering the match
+        let second = cs.iter().nth(1).unwrap();
+        let range = second.selection_range().unwrap();
+        assert_eq!(range.start, Position::new(0, 12));
+        assert_eq!(range.end, Position::new(0, 17));
+    }
+
+    #[test]
+    fn add_cursor_at_next_match_no_match_returns_false() {
+        let rope = ropey::Rope::from_str("hello world");
+        let mut cs = CursorSet::new(Cursor::new(Position::new(0, 5)));
+        let found = cs.add_cursor_at_next_match(&rope, "xyz");
+        assert!(!found);
+        assert_eq!(cs.len(), 1);
+    }
+
+    #[test]
+    fn add_cursor_at_next_match_wraps_around() {
+        // Cursor is past the only occurrence — should wrap around
+        let rope = ropey::Rope::from_str("hello world");
+        let mut cs = CursorSet::new(Cursor::new(Position::new(0, 8)));
+        let found = cs.add_cursor_at_next_match(&rope, "hello");
+        assert!(found);
+        assert_eq!(cs.len(), 2);
+        // The wrapped-around match starts at col 0
+        let cursors: Vec<_> = cs.iter().collect();
+        let new_cursor = cursors[0]; // sorted by position, so (0,0) first
+        let range = new_cursor.selection_range().unwrap();
+        assert_eq!(range.start, Position::new(0, 0));
+        assert_eq!(range.end, Position::new(0, 5));
     }
 }
